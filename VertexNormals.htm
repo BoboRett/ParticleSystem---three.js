@@ -1,0 +1,226 @@
+<!DOCTYPE html><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" type="text/css" href="main.css?version=3"/>
+<head>
+	<title>Particle Test</title>
+</head>
+<body>
+    <div class="page">
+        <p id="identical"></p>
+        <button type="button" onclick="newShape( new THREE.CubeGeometry() )">Cube</button>
+        <button type="button" onclick="newShape( new THREE.ConeGeometry() )">Cone</button>
+        <button type="button" onclick="newShape( new THREE.CylinderGeometry() )">Cylinder</button>
+        <button type="button" onclick="newShape( new THREE.TorusKnotGeometry() )">Torus Knot</button>
+    </div>
+
+	<script src="https://d3js.org/d3.v4.min.js"></script>
+    <script src="../Scripts/three.min.js"></script>
+    <script src="../Scripts/TrackballControls.js"></script>
+	<script src="GPUParticles.js"></script>
+
+    <script>
+
+        //https://jsfiddle.net/Lf6tr7bm/1/
+
+        let oldNormals;
+        let newNormals;
+        let active;
+
+        THREE.Geometry.prototype.computeVertexNormals_New = function ( areaWeighted ) {
+
+    		if ( areaWeighted === undefined ) areaWeighted = true;
+
+    		var v, vl, vA, vB, vC, f, fl, face, vertices, normal;
+
+    		vertices = new Array( this.vertices.length ).fill( 0 ).map( el => [] );
+
+            this.faces.forEach( face => {
+
+                if ( areaWeighted ) {
+
+                    // vertex normals weighted by triangle areas
+                    // http://www.iquilezles.org/www/articles/normals/normals.htm
+                    // cross-product of two adjacent regular polygon edges is directly proportional to polygon's area
+
+        			var cb = new THREE.Vector3(), ab = new THREE.Vector3();
+
+    				vA = this.vertices[ face.a ];
+    				vB = this.vertices[ face.b ];
+    				vC = this.vertices[ face.c ];
+
+    				cb.subVectors( vC, vB );
+    				ab.subVectors( vA, vB );
+    				normal = cb.cross( ab );
+
+    		    } else {
+
+        			this.computeFaceNormals();
+                    normal = face.normal;
+
+                }
+
+                //Test for planar duplicates (vectors pointing in same direction)
+    			!vertices[ face.a ].some( vec => JSON.stringify( vec ) === JSON.stringify( normal ) ) && vertices[ face.a ].push( normal.clone() );
+    			!vertices[ face.b ].some( vec => JSON.stringify( vec ) === JSON.stringify( normal ) ) && vertices[ face.b ].push( normal.clone() );
+    			!vertices[ face.c ].some( vec => JSON.stringify( vec ) === JSON.stringify( normal ) ) && vertices[ face.c ].push( normal.clone() );
+
+    		});
+
+            vertices = vertices.map( arr => arr.reduce( ( acc, vec ) => acc.add( vec ), new THREE.Vector3() ).normalize() );
+
+    		for ( f = 0, fl = this.faces.length; f < fl; f ++ ) {
+
+    			face = this.faces[ f ];
+
+    			var vertexNormals = face.vertexNormals;
+
+    			if ( vertexNormals.length === 3 ) {
+
+                    vertexNormals[ 0 ].copy( vertices[ face.a ] );
+    				vertexNormals[ 1 ].copy( vertices[ face.b ] );
+    				vertexNormals[ 2 ].copy( vertices[ face.c ] );
+
+    			} else {
+
+    				vertexNormals[ 0 ] = vertices[ face.a ].clone();
+    				vertexNormals[ 1 ] = vertices[ face.b ].clone();
+    				vertexNormals[ 2 ] = vertices[ face.c ].clone();
+
+    			}
+
+    		}
+
+    		if ( this.faces.length > 0 ) {
+
+    			this.normalsNeedUpdate = true;
+
+    		}
+
+    	}
+
+        init();
+        animate();
+
+        function renderBox( width, height, bNewNormals ){
+
+            this.newNormals = bNewNormals;
+
+            this.container = document.body;
+
+            this.camera = new THREE.PerspectiveCamera( 28, ( window.innerWidth * width ) / ( window.innerHeight * height ), 1, 10000 );
+            this.camera.position.z = 12;
+
+            this.scene = new THREE.Scene();
+
+    		this.light = new THREE.PointLight( 0xffffff, 5 );
+    		this.light.position.set( 3, 3, 3 );
+    		this.scene.add( this.light );
+
+            this.renderer = new THREE.WebGLRenderer();
+            this.renderer.setPixelRatio( window.devicePixelRatio );
+            this.renderer.setSize( window.innerWidth * width, window.innerHeight * height );
+            this.container.appendChild( this.renderer.domElement );
+            this.renderer.domElement.owner = this;
+
+            this.controls = new THREE.TrackballControls( this.camera, this.renderer.domElement );
+            this.controls.rotateSpeed = 2.0;
+            this.controls.zoomSpeed = 2.2;
+            this.controls.noPan = true;
+            this.controls.dynamicDampingFactor = 0.3;
+
+            this.render = function(){
+
+                this.renderer.render( this.scene, this.camera );
+
+            }
+
+            this.newShape = function( shape ){
+
+                this.scene.remove( this.shape );
+                this.scene.remove( this.helpers );
+
+                this.shape = THREE.SceneUtils.createMultiMaterialObject( shape.clone(),
+                    [new THREE.MeshLambertMaterial( { color: 0xffffff, wireframe: false }),
+                     new THREE.MeshLambertMaterial({color: 0x000000, wireframe: true})]
+                 );
+                this.scene.add( this.shape );
+
+                this.newNormals ? this.shape.children[0].geometry.computeVertexNormals_New() : this.shape.children[0].geometry.computeVertexNormals();
+                this.helpers = new THREE.Group();
+                this.helpers.add( new THREE.FaceNormalsHelper( this.shape.children[0], 0.4 ) );
+                this.helpers.add( new THREE.VertexNormalsHelper( this.shape.children[0], 0.2, 0xff00ff, 1 ) );
+                this.scene.add( this.helpers );
+
+
+            }
+
+        }
+
+        function init(){
+
+            oldNormals = new renderBox( 0.45, 1, false );
+            newNormals = new renderBox( 0.45, 1, true );
+            active = oldNormals;
+
+            newShape( new THREE.CubeGeometry( 1, 1, 1 ) );
+
+            document.querySelectorAll( "canvas" ).forEach( node => ["mousedown","wheel"].forEach( evType => node.addEventListener( evType, ev => active = ev.path[0].owner ) ) );
+
+        }
+
+        function newShape( shape ){
+
+            oldNormals.newShape( shape );
+            newNormals.newShape( shape );
+            document.querySelector( "#identical" ).innerHTML = confirmIdentical();
+
+        }
+
+
+        function animate(){
+
+            animID = requestAnimationFrame( animate );
+
+            oldNormals.controls.update();
+            newNormals.controls.update();
+
+            oldNormals.render();
+            newNormals.render();
+
+            syncControls();
+
+        }
+
+    	function pause(){
+
+    		animID && cancelAnimationFrame( animID );
+
+    	}
+
+        function confirmIdentical(){
+
+            let identical = true;
+
+            oldNormals.shape.children[0].geometry.faces.forEach( ( face, i ) => {
+
+                face.vertexNormals.forEach( ( norm, j ) => {
+
+                    identical = identical ? JSON.stringify( newNormals.shape.children[0].geometry.faces[i].vertexNormals[j] ) === JSON.stringify( norm ) : false;
+
+                })
+
+            })
+
+            return identical
+
+        }
+
+        function syncControls(){
+
+            ( active === oldNormals ? newNormals : oldNormals ).controls.object.copy( active.controls.object );
+
+
+        }
+
+    </script>
+</body>
