@@ -4,61 +4,77 @@ THREE.ParticleSystem = function( source, options ){
 
     this.GUI;
 
+    this.params = {
+
+        TIME_SCALE: options.timeScale !== undefined ? options.timeScale : 1,
+
+        //Emitter
+        MAX_PARTICLES: options.maxParticles !== undefined ? options.maxParticles : 10000,
+        SPAWN_RATE: options.spawnRate !== undefined ? options.spawnRate : 100,
+        ANIMATE_SPAWN: false, //Less memory efficient, stops rebuilding on spawn value change
+
+        SPAWN_EMITFROM: "face", //origin, vert, face, volume
+        SPAWN_ELDISTRIB: "random", //index, random,
+        SPAWN_INDEX: 0,
+        SPAWN_EMDISTRIB:  "random", //centre, random(WIP) //grid(future job)//,
+        GRID_RESOLUTION: 1,
+
+        //Particles
+        SIZE: options.size !== undefined ? options.size : 5,
+        VAR_SIZE: options.varySize !== undefined ? options.varySize : 0,
+
+        LIFETIME: options.lifetime !== undefined ? options.lifetime : 5,
+        VAR_LIFETIME: options.varyLifetime !== undefined ? options.varyLifetime : 0,
+
+        INIT_POS: this.opt_ToVec( options.initPosition !== undefined ? options.initPosition : 0 ),
+        VAR_POS: this.opt_ToVec( options.varyPosition !== undefined ? options.varyPosition : 0 ),
+
+        INIT_VEL: this.opt_ToVec( options.initVelocity !== undefined ? options.initVelocity : new THREE.Vector3( 0, 0, 0 ) ),
+        NORM_VEL: options.normalVelocity !== undefined ? options.normalVelocity : 1,
+        VAR_NORM_VEL: options.varyNormalVelocity !== undefined ? options.varyNormalVelocity : 0,
+        VAR_VEL: this.opt_ToVec( options.varyVelocity !== undefined ? options.varyVelocity : 0 ),
+
+        INIT_COL: this.opt_ToQuat( options.initColour !== undefined ? options.initColour : 1 ),
+        VAR_COL: this.opt_ToQuat( options.varyColour !== undefined ? options.varyColour : 0 ),
+
+        //Display
+        DISPLAY_MODE: "shader", //shader, object, group
+
+    }
+
     this.ACTIVE_PARTICLE = 0;
+    this.PARTICLE_LIMIT_REACHED = false;
 
     this.TIME = 0;
-    this.TIME_SCALE = options.timeScale !== undefined ? options.timeScale : 1;
 
-    this.MAX_PARTICLES = options.maxParticles !== undefined ? options.maxParticles : 10000;
-    this.SPAWN_RATE = options.spawnRate !== undefined ? options.spawnRate : 100;
-    this.rateCounter = 0;
-
-    this.SPAWN_EMITFROM = "face"; //origin, vert, face, volume
-    this.SPAWN_ELDISTRIB = "random"; //index, random
-    this.SPAWN_INDEX = 0;
-    this.SPAWN_EMDISTRIB =  "random"; //centre, random(WIP) //grid(future job)//
-    this.GRID_RESOLUTION = 1;
-
-    this.SIZE = options.size !== undefined ? options.size : 5;
-    this.VAR_SIZE = options.varySize !== undefined ? options.varySize : 0;
-
-    this.LIFETIME = options.lifetime !== undefined ? options.lifetime : 5;
-    this.VAR_LIFETIME = options.varyLifetime !== undefined ? options.varyLifetime : 0;
-
-    this.INIT_POS = this.opt_FloatToVec( options.initPosition !== undefined ? options.initPosition : 0 );
-    this.VAR_POS = this.opt_FloatToVec( options.varyPosition !== undefined ? options.varyPosition : 0 );
-
-    this.INIT_VEL = this.opt_FloatToVec( options.initVelocity !== undefined ? options.initVelocity : new THREE.Vector3( 0, 0, 0 ) );
-    this.NORM_VEL = options.normalVelocity !== undefined ? options.normalVelocity : 1;
-    this.VAR_VEL = this.opt_FloatToVec( options.varyVelocity !== undefined ? options.varyVelocity : 0 );
-
-    this.INIT_COL = this.opt_FloatToQuat( options.initColour !== undefined ? options.initColour : 1 );
-    this.VAR_COL = this.opt_FloatToQuat( options.varyColour !== undefined ? options.varyColour : 0 );
-
-    this.Updated = new Array( this._softParticleLimit ).fill( false );
+    this._rateCounter = 0;
+    this._offset = 0;
+    this._count = 0;
 
     this.VERTEX_SHADER = `
         attribute float size;
         attribute vec4 colour;
         attribute float birthTime;
         attribute float lifetime;
-        attribute vec3 birthPos;
+        attribute vec3 offset;
         attribute vec3 velocity;
 
         uniform float uTime;
         uniform bool attenSize;
 
         varying vec4 vColour;
+        varying vec2 vUv;
 
         void main() {
 
             vColour = colour;
+            vUv = uv;
 
             float age = uTime - birthTime ;
 
             if( age >= 0. && age < lifetime ){
 
-                vec3 newPosition = birthPos + velocity * age;
+                vec3 newPosition = offset + velocity * age + position;
 
                 vec4 mvPosition = modelViewMatrix * vec4( newPosition, 1.0 );
 
@@ -83,6 +99,7 @@ THREE.ParticleSystem = function( source, options ){
 
     this.FRAG_SHADER = `
         varying vec4 vColour;
+        varying vec2 vUv;
 
         void main() {
 
@@ -111,10 +128,12 @@ THREE.ParticleSystem.prototype.constructor = THREE.ParticleSystem;
 
 Object.assign( THREE.ParticleSystem.prototype, {
 
-    init: function(){
+    init: function( overwrite ){
 
-        if( this.points ){ console.warn( "System already initialised!" ); return };
-        this.points = new THREE.Points();
+        if( this.points && !overwrite ){ console.warn( "System already initialised! Use .init( true ) to overwrite." ); return };
+
+        this.remove( this.points );
+        this.points = this.params.DISPLAY_MODE === "object" ? new THREE.Mesh() : new THREE.Points();
         this.add( this.points );
 
         this.refreshGeo();
@@ -122,7 +141,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     },
 
-    calcSpawnPoint: function( position, velocity ){
+    calcOffset: function( position, velocity ){
 
         //Position
         let sourceIndex;
@@ -130,11 +149,11 @@ Object.assign( THREE.ParticleSystem.prototype, {
         let index;
         let normal = new THREE.Vector3();
 
-        switch( this.SPAWN_ELDISTRIB ){
+        switch( this.params.SPAWN_ELDISTRIB ){
 
             case "index":
 
-                sourceIndex = pool => this.SPAWN_INDEX >= pool.length ? pool.length - 1 : this.SPAWN_INDEX;
+                sourceIndex = pool => this.params.SPAWN_INDEX >= pool.length ? pool.length - 1 : this.params.SPAWN_INDEX;
                 break;
 
             case "random":
@@ -144,7 +163,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         }
 
-        switch( this.SPAWN_EMITFROM ){
+        switch( this.params.SPAWN_EMITFROM ){
 
             case "origin":
 
@@ -193,7 +212,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         let pos = new THREE.Vector3();
 
-        switch( this.SPAWN_EMDISTRIB ){
+        switch( this.params.SPAWN_EMDISTRIB ){
 
             case "centre":
 
@@ -207,7 +226,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
                 let genPos;
 
-                switch( this.SPAWN_EMITFROM ){
+                switch( this.params.SPAWN_EMITFROM ){
 
                     case "face":
 
@@ -250,12 +269,14 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     },
 
-    opt_FloatToVec: function( value ){
+    opt_ToVec: function( value ){
 
         let option;
 
         if( value instanceof THREE.Vector3 ){
             option = value;
+        } else if( value instanceof Object ){
+            option = new THREE.Vector3( value.x, value.y, value.z );
         } else{
             option = new THREE.Vector3( value, value, value );
         }
@@ -265,12 +286,14 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     },
 
-    opt_FloatToQuat: function( value ){
+    opt_ToQuat: function( value ){
 
         let option;
 
         if( value instanceof THREE.Quaternion ){
             option = value;
+        } else if( value instanceof Object ){
+            option = new THREE.Quaternion( value.x || value.r, value.y || value.g, value.z || value.b, value.w || value.a );
         } else{
             option = new THREE.Quaternion( value, value, value, value );
         }
@@ -287,15 +310,34 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.TIME = 0;
 
 
-        const particleGeo = new THREE.BufferGeometry();
+        let particleGeo;
+        let attrBuilder;
 
-        particleGeo.addAttribute( 'position',   new THREE.BufferAttribute( new Float32Array( this._softParticleLimit * 3 ), 3 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'birthPos',   new THREE.BufferAttribute( new Float32Array( this._softParticleLimit * 3 ), 3 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'birthTime',  new THREE.BufferAttribute( new Float32Array( this._softParticleLimit ), 1 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'velocity',   new THREE.BufferAttribute( new Float32Array( this._softParticleLimit * 3 ), 3 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'colour',      new THREE.BufferAttribute( new Float32Array( this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'size',       new THREE.BufferAttribute( new Float32Array( this._softParticleLimit ), 1 ).setDynamic( true ) );
-        particleGeo.addAttribute( 'lifetime',   new THREE.BufferAttribute( new Float32Array( this._softParticleLimit ), 1 ).setDynamic( true ) );
+        if( this.params.DISPLAY_MODE === "object" ){
+
+            particleGeo = new THREE.InstancedBufferGeometry();
+            attrBuilder = ( arrSize, itemSize ) => new THREE.InstancedBufferAttribute( new Float32Array( arrSize * itemSize ), itemSize ).setDynamic( true );
+
+            this.instanceObject = new THREE.BufferGeometry().fromGeometry( new THREE.BoxGeometry() );
+
+            particleGeo.addAttribute( 'position',   this.instanceObject.attributes.position.clone() );
+            particleGeo.addAttribute( 'uv',         this.instanceObject.attributes.uv.clone() );
+
+        } else{
+
+            particleGeo = new THREE.BufferGeometry();
+            attrBuilder = ( arrSize, itemSize ) => new THREE.BufferAttribute( new Float32Array( arrSize * itemSize ), itemSize ).setDynamic( true );
+
+            particleGeo.addAttribute( 'position',   attrBuilder( this._softParticleLimit, 3 ) );
+
+        }
+
+        particleGeo.addAttribute( 'offset',     attrBuilder( this._softParticleLimit, 3 ) );
+        particleGeo.addAttribute( 'birthTime',  attrBuilder( this._softParticleLimit, 1 ) );
+        particleGeo.addAttribute( 'velocity',   attrBuilder( this._softParticleLimit, 3 ) );
+        particleGeo.addAttribute( 'colour',     attrBuilder( this._softParticleLimit, 4 ) );
+        particleGeo.addAttribute( 'size',       attrBuilder( this._softParticleLimit, 1 ) );
+        particleGeo.addAttribute( 'lifetime',   attrBuilder( this._softParticleLimit, 1 ) );
 
         this.points.geometry && this.points.geometry.dispose();
         this.points.geometry = particleGeo;
@@ -318,10 +360,16 @@ Object.assign( THREE.ParticleSystem.prototype, {
                                             value: true
                                         }
                                     },
-                                    blending: THREE.AdditiveBlending,
+                                    blending: THREE.NormalBlending,
                                     transparent: true,
 
                                 });
+
+    },
+
+    exportState: function(){
+
+        console.log ( JSON.stringify( this.params ) );
 
     },
 
@@ -329,33 +377,36 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         const i = this.ACTIVE_PARTICLE;
 
-        const birthPosAttribute =   this.points.geometry.getAttribute( 'birthPos' );
+        this._offset = this._offset || i;
+        this._count++;
+
+        const offsetAttribute =   this.points.geometry.getAttribute( 'offset' );
         const birthTimeAttribute =  this.points.geometry.getAttribute( 'birthTime' );
         const velocityAttribute =   this.points.geometry.getAttribute( 'velocity' );
         const colourAttribute =     this.points.geometry.getAttribute( 'colour' );
         const sizeAttribute =       this.points.geometry.getAttribute( 'size' );
         const lifetimeAttribute =   this.points.geometry.getAttribute( 'lifetime' );
 
-        const colour = this.INIT_COL.clone();
+        const colour = this.params.INIT_COL.clone();
 
-        let [ position, normal ] = this.calcSpawnPoint( this.INIT_POS.clone() );
+        let [ position, normal ] = this.calcOffset( this.params.INIT_POS.clone() );
 
-        birthPosAttribute.array[ i * 3     ] = position.x + this.VAR_POS.x * THREE.Math.randFloat( -1, 1 );
-        birthPosAttribute.array[ i * 3 + 1 ] = position.y + this.VAR_POS.y * THREE.Math.randFloat( -1, 1 );
-        birthPosAttribute.array[ i * 3 + 2 ] = position.z + this.VAR_POS.z * THREE.Math.randFloat( -1, 1 );
+        offsetAttribute.array[ i * 3     ] = position.x + this.params.VAR_POS.x * THREE.Math.randFloat( -1, 1 );
+        offsetAttribute.array[ i * 3 + 1 ] = position.y + this.params.VAR_POS.y * THREE.Math.randFloat( -1, 1 );
+        offsetAttribute.array[ i * 3 + 2 ] = position.z + this.params.VAR_POS.z * THREE.Math.randFloat( -1, 1 );
 
 
         //Velocity
-        velocityAttribute.array[ i * 3     ] = this.INIT_VEL.x + this.NORM_VEL * normal.x + this.VAR_VEL.x * THREE.Math.randFloat( -1, 1 );
-        velocityAttribute.array[ i * 3 + 1 ] = this.INIT_VEL.y + this.NORM_VEL * normal.y + this.VAR_VEL.y * THREE.Math.randFloat( -1, 1 );
-        velocityAttribute.array[ i * 3 + 2 ] = this.INIT_VEL.z + this.NORM_VEL * normal.z + this.VAR_VEL.z * THREE.Math.randFloat( -1, 1 );
+        velocityAttribute.array[ i * 3     ] = this.params.INIT_VEL.x + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.x + this.params.VAR_VEL.x * THREE.Math.randFloat( -1, 1 );
+        velocityAttribute.array[ i * 3 + 1 ] = this.params.INIT_VEL.y + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.y + this.params.VAR_VEL.y * THREE.Math.randFloat( -1, 1 );
+        velocityAttribute.array[ i * 3 + 2 ] = this.params.INIT_VEL.z + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.z + this.params.VAR_VEL.z * THREE.Math.randFloat( -1, 1 );
 
 
         //Colour
-        colour.x = THREE.Math.clamp( colour.x + this.VAR_COL.x * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.y = THREE.Math.clamp( colour.y + this.VAR_COL.y * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.z = THREE.Math.clamp( colour.z + this.VAR_COL.z * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.w = THREE.Math.clamp( colour.w + this.VAR_COL.w * THREE.Math.randFloat( -1, 1 ), 0, 1 );
+        colour.x = THREE.Math.clamp( colour.x + this.params.VAR_COL.x * THREE.Math.randFloat( -1, 1 ), 0, 1 );
+        colour.y = THREE.Math.clamp( colour.y + this.params.VAR_COL.y * THREE.Math.randFloat( -1, 1 ), 0, 1 );
+        colour.z = THREE.Math.clamp( colour.z + this.params.VAR_COL.z * THREE.Math.randFloat( -1, 1 ), 0, 1 );
+        colour.w = THREE.Math.clamp( colour.w + this.params.VAR_COL.w * THREE.Math.randFloat( -1, 1 ), 0, 1 );
 
         colourAttribute.array[ i * 4     ] = colour.x;
         colourAttribute.array[ i * 4 + 1 ] = colour.y;
@@ -363,29 +414,23 @@ Object.assign( THREE.ParticleSystem.prototype, {
         colourAttribute.array[ i * 4 + 3 ] = colour.w;
 
         // size, lifetime and starttime
-        sizeAttribute.array[ i ] = this.SIZE + THREE.Math.randFloat( -1, 1 ) * this.VAR_SIZE;
-        lifetimeAttribute.array[ i ] = this.LIFETIME + THREE.Math.randFloat( -1, 1 ) * this.VAR_LIFETIME;
+        sizeAttribute.array[ i ] = this.params.SIZE + THREE.Math.randFloat( -1, 1 ) * this.params.VAR_SIZE;
+        lifetimeAttribute.array[ i ] = this.params.LIFETIME + THREE.Math.randFloat( -1, 1 ) * this.params.VAR_LIFETIME;
         birthTimeAttribute.array[ i ] = this.TIME;
 
-        this.Updated[ i ] = true;
-
+        this.ACTIVE_PARTICLE >= this._softParticleLimit && console.log( "boop" );
         this.ACTIVE_PARTICLE = this.ACTIVE_PARTICLE >= this._softParticleLimit ? 0 : this.ACTIVE_PARTICLE + 1;
-
 
     },
 
     updateGeo: function(){
 
-        let offset = this.Updated.indexOf( true );
-        offset = offset === -1 ? 0 : offset;
-        const count = this.Updated.length - this.Updated.lastIndexOf( true );
-
-        ['birthPos', 'birthTime', 'velocity', 'colour', 'size', 'lifetime'].forEach( attrName => {
+        ['offset', 'birthTime', 'velocity', 'colour', 'size', 'lifetime'].forEach( attrName => {
 
             const attr = this.points.geometry.getAttribute( attrName );
 
-            attr.updateRange.count = count * attr.itemSize;
-            attr.updateRange.offset = offset * attr.itemSize;
+            attr.updateRange.count = this._count * attr.itemSize;
+            attr.updateRange.offset = this._offset * attr.itemSize;
 
             attr.needsUpdate = true;
 
@@ -395,15 +440,16 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     update: function(){
 
-        const delta = clock.getDelta() * this.TIME_SCALE;
+        const delta = clock.getDelta() * this.params.TIME_SCALE;
 
         this.TIME += delta;
+        this.count = 0;
 
         if( this.TIME < 0 ) this.TIME = 0;
 
-        if ( delta > 0 && this.TIME > this.rateCounter/this.SPAWN_RATE ) {
+        if ( delta > 0 && this.TIME > this.rateCounter/this.params.SPAWN_RATE ) {
 
-            for( let i = 0; i < this.SPAWN_RATE*delta; i++){
+            for( let i = 0; i < this.params.SPAWN_RATE*delta; i++){
 
                 this.rateCounter++;
                 this.spawnParticle();
@@ -413,14 +459,14 @@ Object.assign( THREE.ParticleSystem.prototype, {
         }
 
         this.updateGeo();
-        this.Updated = this.Updated ? this.Updated.fill( false ) : new Array( this._softParticleLimit ).fill( false );
         this.points.material.uniforms.uTime.value = this.TIME;
 
     },
 
     dispose: function () {
 
-		this.points.dispose();
+		this.points.geometry.dispose();
+		this.points.material.dispose();
 
 	},
 
@@ -458,6 +504,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         //////Emitter Settings//////
         let emitter = gui.addFolder( "Emitter" );
         emitter.add( this, "spawnRate", 0, 500, 10 );
+        emitter.add( this, "animateSpawn" ).onChange( () => this.init( true ) );
 
         let source = emitter.addFolder( "Source" );
         const assertEmitIndex = () => assertNumericController( source, "emitIndex", ["vert","face"].includes( this.emitFrom ) && this.elementDistribution === "index", 0, ( this.emitFrom === "vert" ? this.source.geometry.vertices.length : this.source.geometry.faces.length ) - 1 );
@@ -484,11 +531,18 @@ Object.assign( THREE.ParticleSystem.prototype, {
         addVectorProp( position, "Variance", this.varyPosition, 0 ,5 );
         let velocity = particle.addFolder( "Velocity" );
         velocity.add( this, "normalVelocity", -5, 5, 0.1 );
+        velocity.add( this, "varyNormalVelocity", 0, 1, 0.1 );
         addVectorProp( velocity, "Initial", this.initVelocity, -5, 5 );
         addVectorProp( velocity, "Variance", this.varyVelocity, 0, 5 );
         let color = particle.addFolder( "Color" );
         addVectorProp( color, "Initial", this.initColour, 0, 1 );
         addVectorProp( color, "Variance", this.varyColour, 0, 1 );
+
+        //////Display Settings//////
+        let display = gui.addFolder( "Display" );
+        display.add( this, "displayMode", {Point: "shader", Object: "object"}).onChange( () => this.init( true ) );
+
+        gui.add( this, "exportState" );
 
 
 
@@ -581,45 +635,65 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "maxParticles": {
 
-        get: function(){ return this.MAX_PARTICLES },
+        get: function(){ return this.params.MAX_PARTICLES },
 
         set: function( value ){
 
-            console.warn( "New maxParticles. Rebuilding system." );
-            this.MAX_PARTICLES = value;
-            this.refreshGeo();
+            console.warn( "New particle limit. Rebuilding system." );
+            this.params.MAX_PARTICLES = value;
+            this.init( true );
 
         }
 
     },
     "_softParticleLimit": {
 
-       get: function(){
+        get: function(){
 
-           let tmp = this.SPAWN_RATE * ( this.LIFETIME + this.VAR_LIFETIME );
+            let tmp = this.PARTICLE_LIMIT_REACHED ? this.params.MAX_PARTICLES : this.params.SPAWN_RATE * ( this.params.LIFETIME + this.params.VAR_LIFETIME );
 
-           if( tmp > this.MAX_PARTICLES ){
+            if( tmp > this.params.MAX_PARTICLES ){
 
-               tmp = this.MAX_PARTICLES;
-               console.warn( "Max number of Particles will be exceeded with current Spawn Rate and Lifetime! Capping to .maxParticles; increase to remove limit." );
+                tmp = this.params.MAX_PARTICLES;
+                console.warn( "Max number of Particles will be exceeded with current Spawn Rate and Lifetime! Capping to .maxParticles; increase to remove limit." );
+                this.PARTICLE_LIMIT_REACHED = true;
 
-           }
+            }
 
-           return tmp
+            if( this.params.ANIMATE_SPAWN ) tmp = this.params.MAX_PARTICLES;
 
-       },
+            return tmp
+
+        },
 
        set: function( value ){ console.warn( "This value is used internally, there is nothing to set. Perhaps you meant to set .maxParticles?" ) }
 
     },
     "spawnRate": {
 
-        get: function(){ return this.SPAWN_RATE },
+        get: function(){ return this.params.SPAWN_RATE },
 
         set: function( value ){
 
-            this.SPAWN_RATE = value;
-            this.refreshGeo();
+            this.params.SPAWN_RATE = value;
+            if( this.params.ANIMATE_SPAWN ){
+
+                this.rateCounter = 0;
+                this.PARTICLE_LIMIT_REACHED = false;
+
+            } else{ this.init( true ); };
+
+        }
+
+    },
+    "animateSpawn": {
+
+        get: function(){ return this.params.ANIMATE_SPAWN },
+
+        set: function( value ){
+
+            this.params.ANIMATE_SPAWN = value
+            console.warn( "Modifying .animateSpawn dynamically requires a rebuild. Call .init( true ) to reinitialise Particle System." )
 
         }
 
@@ -627,64 +701,64 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "emitFrom": {
 
-        get: function(){ return this.SPAWN_EMITFROM },
+        get: function(){ return this.params.SPAWN_EMITFROM },
 
-        set: function( value ){ this.SPAWN_EMITFROM = value; }
+        set: function( value ){ this.params.SPAWN_EMITFROM = value; }
 
     },
     "elementDistribution": {
 
-       get: function(){ return this.SPAWN_ELDISTRIB },
+        get: function(){ return this.params.SPAWN_ELDISTRIB },
 
-       set: function( value ){
+        set: function( value ){
 
-           this.SPAWN_ELDISTRIB = value;
+            this.params.SPAWN_ELDISTRIB = value;
 
-           if( this.SPAWN_ELDISTRIB > ( this.SPAWN_EMITFROM === "vert" ? this.source.geometry.vertices.length : this.source.geometry.faces.length ) - 1 ) this.emitIndex = 0;
+            if( this.params.SPAWN_ELDISTRIB > ( this.params.SPAWN_EMITFROM === "vert" ? this.source.geometry.vertices.length : this.source.geometry.faces.length ) - 1 ) this.emitIndex = 0;
 
-       }
+        }
 
     },
     "emitIndex": {
 
-       get: function(){ return this.SPAWN_INDEX },
+        get: function(){ return this.params.SPAWN_INDEX },
 
-       set: function( value ){ this.SPAWN_INDEX = value }
+        set: function( value ){ this.params.SPAWN_INDEX = value }
 
     },
     "emitDistribution": {
 
-       get: function(){ return this.SPAWN_EMDISTRIB },
+        get: function(){ return this.params.SPAWN_EMDISTRIB },
 
-       set: function( value ){ this.SPAWN_EMDISTRIB = value }
+        set: function( value ){ this.params.SPAWN_EMDISTRIB = value }
 
     },
     "gridResolution": {
 
-       get: function(){ console.log( "Not yet implemented" ) },//return this.GRID_RESOLUTION },
+        get: function(){ console.log( "Not yet implemented" ) },//return this.params.GRID_RESOLUTION },
 
-       set: function( value ){ this.GRID_RESOLUTION = value }
+        set: function( value ){ this.params.GRID_RESOLUTION = value }
 
     },
 
     "size": {
 
-        get: function(){ return this.SIZE },
+        get: function(){ return this.params.SIZE },
 
         set: function( value ){
 
-            this.SIZE = value;
+            this.params.SIZE = value;
 
         }
 
     },
     "varySize": {
 
-        get: function(){ return this.VAR_SIZE },
+        get: function(){ return this.params.VAR_SIZE },
 
         set: function( value ){
 
-            this.VAR_SIZE = value;
+            this.params.VAR_SIZE = value;
 
         }
 
@@ -692,24 +766,34 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "lifetime": {
 
-        get: function(){ return this.LIFETIME },
+        get: function(){ return this.params.LIFETIME },
 
         set: function( value ){
 
-            this.LIFETIME = value;
-            this.refreshGeo();
+            this.params.LIFETIME = value;
+            if( this.params.ANIMATE_SPAWN ){
+
+                this.rateCounter = 0;
+                this.PARTICLE_LIMIT_REACHED = false;
+
+            } else{ this.init( true ) };
 
         }
 
     },
     "varyLifetime": {
 
-        get: function(){ return this.VAR_LIFETIME },
+        get: function(){ return this.params.VAR_LIFETIME },
 
         set: function( value ){
 
-            this.VAR_LIFETIME = value;
-            this.refreshGeo();
+            this.params.VAR_LIFETIME = value;
+            if( this.params.ANIMATE_SPAWN ){
+
+                this.rateCounter = 0;
+                this.PARTICLE_LIMIT_REACHED = false;
+
+            } else{ this.init( true ) };
 
         }
 
@@ -717,22 +801,22 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "initPosition": {
 
-        get: function(){ return this.INIT_POS },
+        get: function(){ return this.params.INIT_POS },
 
         set: function( value ){
 
-            this.INIT_POS = this.opt_FloatToVec( value );
+            this.params.INIT_POS = this.opt_FloatToVec( value );
 
         }
 
     },
     "varyPosition": {
 
-        get: function(){ return this.VAR_POS },
+        get: function(){ return this.params.VAR_POS },
 
         set: function( value ){
 
-            this.VAR_POS = this.opt_FloatToVec( value );
+            this.params.VAR_POS = this.opt_FloatToVec( value );
 
         }
 
@@ -740,29 +824,36 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "normalVelocity": {
 
-       get: function(){ return this.NORM_VEL },
+       get: function(){ return this.params.NORM_VEL },
 
-       set: function( value ){ this.NORM_VEL = value }
+       set: function( value ){ this.params.NORM_VEL = value }
+
+    },
+    "varyNormalVelocity": {
+
+       get: function(){ return this.params.VAR_NORM_VEL },
+
+       set: function( value ){ this.params.VAR_NORM_VEL = value }
 
     },
     "initVelocity": {
 
-        get: function(){ return this.INIT_VEL },
+        get: function(){ return this.params.INIT_VEL },
 
         set: function( value ){
 
-            this.INIT_VEL = this.opt_FloatToVec( value );
+            this.params.INIT_VEL = this.opt_FloatToVec( value );
 
         }
 
     },
     "varyVelocity": {
 
-        get: function(){ return this.VAR_VEL },
+        get: function(){ return this.params.VAR_VEL },
 
         set: function( value ){
 
-            this.VAR_VEL = this.opt_FloatToVec( value );
+            this.params.VAR_VEL = this.opt_FloatToVec( value );
 
         }
 
@@ -770,22 +861,36 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     "initColour": {
 
-        get: function(){ return this.INIT_COL },
+        get: function(){ return this.params.INIT_COL },
 
         set: function( value ){
 
-            this.INIT_COL = this.opt_FloatToVec( value );
+            this.params.INIT_COL = this.opt_FloatToVec( value );
 
         }
 
     },
     "varyColour": {
 
-        get: function(){ return this.VAR_COL },
+        get: function(){ return this.params.VAR_COL },
 
         set: function( value ){
 
-            this.VAR_COL = this.opt_FloatToVec( value );
+            this.params.VAR_COL = this.opt_FloatToVec( value );
+
+        }
+
+    },
+
+    "displayMode": {
+
+        get: function(){ return this.params.DISPLAY_MODE },
+
+        set: function( value ){
+
+            this.params.DISPLAY_MODE = value;
+            console.warn( "Modifying .displayMode dynamically requires a rebuild. Call .init( true ) to reinitialise Particle System.")
+            this.init();
 
         }
 
