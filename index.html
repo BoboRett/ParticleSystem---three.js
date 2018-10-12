@@ -1,6 +1,5 @@
 <!DOCTYPE html><meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" type="text/css" href="main.css?version=3"/>
 <head>
 	<title>Particle Test</title>
 </head>
@@ -9,7 +8,7 @@
     </div>
 
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/5.7.0/d3.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/97/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/97/three.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dat-gui/0.7.3/dat.gui.min.js"></script>
     <script src="https://rawgit.com/mrdoob/three.js/master/examples/js/controls/TrackballControls.js"></script>
 	<script src="https://rawgit.com/mrdoob/stats.js/master/build/stats.min.js"></script>
@@ -43,12 +42,18 @@
         scene.add( source );
 		scene.add( new THREE.FaceNormalsHelper( source ) );
 
+		const instObj = new THREE.Mesh( new THREE.BoxGeometry(), new THREE.MeshLambertMaterial( {color: 0x0000ff }) );
+		instObj.translateX( 3 );
+		scene.add( instObj );
+		instObj.geometry.computeVertexNormals_New();
+
         particleSystem = new THREE.ParticleSystem( source, {
 			size: 3,
 			maxParticles: 10000,
 			spawnRate: undefined,
 			lifetime: 5,
 			showOptions: true,
+			instanceObject: instObj,
 			//varyVelocity: 0,
 			//initColour: {r:1,a:0.5},
 			//varyColour: new THREE.Quaternion( 1, 0, 0, 0.3 ),
