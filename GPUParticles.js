@@ -4,8 +4,24 @@ THREE.ParticleSystem = function( source, options ){
 
     this.GUI;
 
-    THREE.ShaderChunk.begin_vertex_inst = "\nvec3 instPosition = position * size + offset + velocity * ( uTime - birthTime );\nvec3 transformed = vec3( instPosition );\n";
-    THREE.ShaderChunk.morphtarget_vertex_inst = "#ifdef USE_MORPHTARGETS\n\ttransformed += ( morphTarget0 - instPosition ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - instPosition ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - instPosition ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - instPosition ) * morphTargetInfluences[ 3 ];\n\t#ifndef USE_MORPHNORMALS\n\ttransformed += ( morphTarget4 - instPosition ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - instPosition ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - instPosition ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - instPosition ) * morphTargetInfluences[ 7 ];\n\t#endif\n#endif\n";
+    THREE.ShaderChunk.gpuparticle_pars = "\nattribute vec3 offset;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute vec3 velocity;\nattribute float size;\nuniform float uTime;\nuniform vec3 accel;\nuniform bool attenSize;\n";
+
+    THREE.ShaderChunk.begin_vertex_modified = "\nfloat t = uTime - birthTime;\n#ifdef PHYS_ENABLED\nvec3 finalPosition = offset + velocity * t + accel * pow( t, 2.0 );\n#endif\n#ifndef PHYS_ENABLED\nvec3 finalPosition = position + offset + velocity * t;\n#endif\nvec3 transformed = vec3( finalPosition );\n";
+
+    THREE.ShaderChunk.morphtarget_vertex_modified = "#ifdef USE_MORPHTARGETS\n\ttransformed += ( morphTarget0 - finalPosition ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - finalPosition ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - finalPosition ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - finalPosition ) * morphTargetInfluences[ 3 ];\n\t#ifndef USE_MORPHNORMALS\n\ttransformed += ( morphTarget4 - finalPosition ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - finalPosition ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - finalPosition ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - finalPosition ) * morphTargetInfluences[ 7 ];\n\t#endif\n#endif\n";
+
+    THREE.ShaderChunk.physics_attractor_pars = "\n#if ( NUM_PHYS_ATTR > 0 )\n\tstruct PhysicsAttractor {\n\t\tvec3 position;\n\t\tfloat strength;\n\t\tfloat radius;\n\t\tfloat decay;\n\t};\nuniform PhysicsAttractor physicsAttractors[ NUM_PHYS_ATTR ];\n#endif\n";
+
+    THREE.ShaderChunk.physics_attractor_vertex = `
+#if NUM_PHYS_ATTR > 0
+    PhysicsAttractor physicsAttractor;
+    #pragma unroll_loop
+        for ( int i = 0; i < NUM_PHYS_ATTR; i ++ ) {
+                physicsAttractor = physicsAttractors[ i ];
+                sumVelocity += ( offset - physicsAttractor.position ) * physicsAttractor.strength / pow( abs( physicsAttractor.radius ), physicsAttractor.decay );
+            }
+#endif
+    `;
 
     this.params = {
 
@@ -19,11 +35,11 @@ THREE.ParticleSystem = function( source, options ){
         SPAWN_EMITFROM: "face", //origin, vert, face, volume
         SPAWN_ELDISTRIB: "random", //index, random,
         SPAWN_INDEX: 0,
-        SPAWN_EMDISTRIB:  "random", //centre, random(WIP) //grid(future job)//,
+        SPAWN_EMDISTRIB: "random", //centre, random(WIP) //grid(future job)//,
         GRID_RESOLUTION: 1,
 
         //Particles
-        SIZE: options.size !== undefined ? options.size : 5,
+        SIZE: options.size !== undefined ? options.size : 1,
         VAR_SIZE: options.varySize !== undefined ? options.varySize : 0,
 
         LIFETIME: options.lifetime !== undefined ? options.lifetime : 5,
@@ -44,6 +60,9 @@ THREE.ParticleSystem = function( source, options ){
         DISPLAY_MODE: "shader", //shader, object, group
         INSTANCED: options.instanceObject !== undefined ? options.instanceObject : null,
 
+        //Physics
+        ENABLE_PHYSICS : true,
+
     }
 
     this.ACTIVE_PARTICLE = 0;
@@ -56,15 +75,8 @@ THREE.ParticleSystem = function( source, options ){
     this._count = 0;
 
     this.VERTEX_SHADER = `
-        attribute float size;
-        attribute vec4 color;
-        attribute float birthTime;
-        attribute float lifetime;
-        attribute vec3 offset;
-        attribute vec3 velocity;
 
-        uniform float uTime;
-        uniform bool attenSize;
+        #include <gpuparticle_pars>
 
         varying vec4 vColor;
         varying vec2 vUv;
@@ -78,16 +90,14 @@ THREE.ParticleSystem = function( source, options ){
 
             if( age >= 0. && age < lifetime ){
 
-                vec3 newPosition = offset + velocity * age + position;
+                #include <begin_vertex_modified>
 
-                vec4 mvPosition = modelViewMatrix * vec4( newPosition, 1.0 );
+                vec4 mvPosition = modelViewMatrix * vec4( transformed, 1.0 );
 
                 gl_PointSize = size;
 
                 if( attenSize ){
-
                     if( projectionMatrix[2][3] == -1.0 ) gl_PointSize *= 20.0 / -mvPosition.z; //SIZE ATTENUATION
-
                 }
 
                 gl_Position = projectionMatrix * mvPosition;
@@ -320,10 +330,10 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             const instanceGeo = new THREE.BufferGeometry().fromGeometry( this.instanceObject.geometry );
 
-            particleGeo.addAttribute( 'position',   instanceGeo.attributes.position  );
-            particleGeo.addAttribute( 'normal',     instanceGeo.attributes.normal  );
-            particleGeo.addAttribute( 'color',      instanceGeo.attributes.color  );
-            particleGeo.addAttribute( 'uv',         instanceGeo.attributes.uv  );
+            particleGeo.addAttribute( 'position',   instanceGeo.attributes.position );
+            particleGeo.addAttribute( 'normal',     instanceGeo.attributes.normal );
+            particleGeo.addAttribute( 'color',      instanceGeo.attributes.color );
+            particleGeo.addAttribute( 'uv',         instanceGeo.attributes.uv );
 
         } else{
 
@@ -349,56 +359,57 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         let particleMat;
 
+        physObjs = [{ position: new THREE.Vector3( 1, 1, 1 ), strength: -4, radius: 5, decay: 2 },
+                    { position: new THREE.Vector3( -3, -1, -1 ), strength: 1, radius: 5, decay: 2 }];
+
+        let uniforms = {
+            'uTime': {
+                value: 0.0
+            },
+            'physicsAttractors': {
+                properties: { position: {}, strength: {}, radius: {}, decay: {} },
+                value: physObjs
+            },
+            'attenSize' : {
+                value: true
+            },
+            'accel': {
+                value: new THREE.Vector3( 0, -2, 0 )
+            }
+        };
+
+        let defines = [
+            {
+                name: "PHYS_ENABLED",
+                value: this.params.ENABLE_PHYSICS
+            }
+        ];
+
         if( this.params.DISPLAY_MODE === "object" && this.instanceObject ){
 
             let mat = this.instanceObject.material.clone();
 
+            mat.uniforms = uniforms;
+
             mat.onBeforeCompile = ( shader, renderer ) => {
 
-                shader.vertexShader = `attribute vec3 offset;\nattribute float birthTime;\nuniform float uTime;\nattribute vec3 velocity;\nattribute float size;\n` + shader.vertexShader.replace( "begin_vertex", "begin_vertex_inst" ).replace( "morphtarget_vertex", "morphtarget_vertex_inst" );
+                shader.vertexShader = "#include <gpuparticle_pars>" + THREE.ShaderChunk.physics_attractor_pars.replace( /NUM_PHYS_ATTR/g, physObjs.length ) + shader.vertexShader.replace( "void main() {", "void main() {\nvec3 sumVelocity = velocity;\n" + THREE.ShaderChunk.physics_attractor_vertex.replace( /NUM_PHYS_ATTR/g, physObjs.length ) ).replace( "begin_vertex", "begin_vertex_modified" ).replace( "morphtarget_vertex", "morphtarget_vertex_modified" );
 
-                this.points.material = new THREE.ShaderMaterial( {
-                                                        vertexShader: shader.vertexShader,
-                                                        fragmentShader: shader.fragmentShader,
-                                                        uniforms: Object.assign( shader.uniforms, {
-                                                            'uTime': {
-                                                                value: 0.0
-                                                            },
-                                                            'attenSize': {
-                                                                value: true
-                                                            }
-                                                        }),
-                                                        blending: THREE.NormalBlending,
-                                                        transparent: true,
+                //shader.fragmentShader = "boop" + shader.fragmentShader;
 
-                                                    });
+                shader.uniforms = Object.assign( shader.uniforms, mat.uniforms );
 
             };
 
-            mat.uniforms= {
-                'uTime': {
-                    value: 0.0
-                },
-                'attenSize': {
-                    value: true
-                }
-            };
             particleMat = mat;
 
         } else{
 
             particleMat =  new THREE.ShaderMaterial( {
 
-                                        vertexShader: this.VERTEX_SHADER,
+                                        vertexShader: defines.map( define => define.value ? "#define " + define.name : "\n" ) + this.VERTEX_SHADER,
                                         fragmentShader: this.FRAG_SHADER,
-                                        uniforms: {
-                                            'uTime': {
-                                                value: 0.0
-                                            },
-                                            'attenSize': {
-                                                value: true
-                                            }
-                                        },
+                                        uniforms: uniforms,
                                         blending: THREE.NormalBlending,
                                         transparent: true,
 
@@ -569,7 +580,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         lifetime.add( this, "varyLifetime", 0, 10, 0.1 );
 
         let size = particle.addFolder( "Size" );
-        size.add( this, "size", 1, 20, 1 );
+        size.add( this, "size", 0.1, 20, 0.1 );
         size.add( this, "varySize", 0, 20, 1 );
 
         let position = particle.addFolder( "Position" );
@@ -588,6 +599,8 @@ Object.assign( THREE.ParticleSystem.prototype, {
         let display = gui.addFolder( "Display" );
         display.add( this, "displayMode", {Point: "shader", Object: "object"}).onChange( () => this.init( true ) );
 
+        console.log( this )
+        gui.add( this, "enablePhysics" );
         gui.add( this, "exportState" );
 
 
@@ -949,6 +962,19 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
         set: function( value ){
 
             this.params.INSTANCED = value;
+            this.init( true );
+
+        }
+
+    },
+
+    "enablePhysics": {
+
+        get: function(){ return this.params.ENABLE_PHYSICS },
+
+        set: function( value ){
+
+            this.params.ENABLE_PHYSICS = value;
             this.init( true );
 
         }
