@@ -10,18 +10,9 @@ THREE.ParticleSystem = function( source, options ){
 
     THREE.ShaderChunk.morphtarget_vertex_modified = "#ifdef USE_MORPHTARGETS\n\ttransformed += ( morphTarget0 - finalPosition ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - finalPosition ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - finalPosition ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - finalPosition ) * morphTargetInfluences[ 3 ];\n\t#ifndef USE_MORPHNORMALS\n\ttransformed += ( morphTarget4 - finalPosition ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - finalPosition ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - finalPosition ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - finalPosition ) * morphTargetInfluences[ 7 ];\n\t#endif\n#endif\n";
 
-    THREE.ShaderChunk.physics_attractor_pars = "\n#if ( NUM_PHYS_ATTR > 0 )\n\tstruct PhysicsAttractor {\n\t\tvec3 position;\n\t\tfloat strength;\n\t\tfloat radius;\n\t\tfloat decay;\n\t};\nuniform PhysicsAttractor physicsAttractors[ NUM_PHYS_ATTR ];\n#endif\n";
+    THREE.ShaderChunk.physics_attractor_pars = "";
 
-    THREE.ShaderChunk.physics_attractor_vertex = `
-#if NUM_PHYS_ATTR > 0
-    PhysicsAttractor physicsAttractor;
-    #pragma unroll_loop
-        for ( int i = 0; i < NUM_PHYS_ATTR; i ++ ) {
-                physicsAttractor = physicsAttractors[ i ];
-                sumVelocity += ( offset - physicsAttractor.position ) * physicsAttractor.strength / pow( abs( physicsAttractor.radius ), physicsAttractor.decay );
-            }
-#endif
-    `;
+    THREE.ShaderChunk.physics_attractor_vertex = ``;
 
     this.params = {
 
@@ -62,6 +53,7 @@ THREE.ParticleSystem = function( source, options ){
 
         //Physics
         ENABLE_PHYSICS : true,
+        CONST_ACCEL: options.constantAcceleration !== undefined ? options.constantAcceleration : new THREE.Vector3( 0, -2, 0 ),
 
     }
 
@@ -86,7 +78,7 @@ THREE.ParticleSystem = function( source, options ){
             vColor = color;
             vUv = uv;
 
-            float age = uTime - birthTime ;
+            float age = uTime - birthTime;
 
             if( age >= 0. && age < lifetime ){
 
@@ -192,61 +184,98 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         let fragmentVelocity = `
             uniform float delta;
+            uniform vec3 accel;
             uniform sampler2D updated;
             uniform sampler2D newVel;
+
+            #if ( NUM_PHYS_ATTR > 0 )
+                struct PhysicsAttractor {
+                        vec3 position;
+                        float strength;
+                        float radius;
+                        float decay;
+                    };
+                uniform PhysicsAttractor physicsAttractors[ NUM_PHYS_ATTR ];
+            #endif
+
 
             void main() {
 
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
-                vec4 tmpVel = texture2D( textureVelocity, uv );
+                vec3 uVel = texture2D( textureVelocity, uv ).xyz;
+                vec4 COM = texture2D( textureOffset, uv );
 
                 vec4 isUpdated = texture2D( updated, uv );
                 if( isUpdated.x > 0.0 ){
-                    tmpVel = texture2D( newVel, uv );
-
+                    uVel = texture2D( newVel, uv ).xyz;
                 }
+                vec3 vVel = uVel;
 
-                gl_FragColor = vec4( tmpVel.xyz, 1 );
+                #if NUM_PHYS_ATTR > 0
+                    PhysicsAttractor physicsAttractor;
+                    vec3 distance;
+                    #pragma unroll_loop
+                        for ( int i = 0; i < NUM_PHYS_ATTR; i ++ ) {
+                                physicsAttractor = physicsAttractors[ i ];
+                                distance = COM.xyz - physicsAttractor.position;
+                                if( length( distance ) < physicsAttractor.radius ){
+                                    vVel += normalize( distance ) * physicsAttractor.strength * ( physicsAttractor.radius - length( distance ) ) / ( physicsAttractor.radius * pow( length( distance ), physicsAttractor.decay ) );
+                                }
+
+                        }
+                #endif
+
+                gl_FragColor = vec4( vVel + accel * delta, 1 );
 
             }
         `;
 
+        let physObjs = [{ position: new THREE.Vector3( 1, 1, 1 ), strength: -0.1, radius: 7, decay: 2 }];
+
         let texSize = Math.pow( 2, Math.ceil( Math.log2( Math.sqrt( this._softParticleLimit ) ) ) );
         let gpuCompute = new GPUComputationRenderer( texSize, texSize, renderer );
         gpuCompute.texSize = texSize;
-        this.gpuCompute = gpuCompute;
 
-        let dtOffset = gpuCompute.createTexture();
-        let dtVelocity = gpuCompute.createTexture();
+        let dataOffset = gpuCompute.createTexture();
+        let dataVelocity = gpuCompute.createTexture();
 
-        this.offsetVar = gpuCompute.addVariable( "textureOffset", fragmentOffset, dtOffset );
-        this.velocityVar = gpuCompute.addVariable( "textureVelocity", fragmentVelocity, dtVelocity );
+        let offsetVar = gpuCompute.addVariable( "textureOffset", fragmentOffset, dataOffset );
+        let velocityVar = gpuCompute.addVariable( "textureVelocity", fragmentVelocity.replace( /NUM_PHYS_ATTR/g, physObjs.length ), dataVelocity );
 
-        gpuCompute.setVariableDependencies( this.offsetVar, [ this.velocityVar, this.offsetVar ] );
-        gpuCompute.setVariableDependencies( this.velocityVar, [ this.velocityVar, this.offsetVar ] );
+        gpuCompute.setVariableDependencies( offsetVar, [ velocityVar, offsetVar ] );
+        gpuCompute.setVariableDependencies( velocityVar, [ velocityVar, offsetVar ] );
 
-        let offsetUniforms = this.offsetVar.material.uniforms;
-        let velocityUniforms = this.velocityVar.material.uniforms;
+        let updatedUniform = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType )};
 
-        let updated = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType )};
+        let offsetUniforms = offsetVar.material.uniforms;
+        let velocityUniforms = velocityVar.material.uniforms;
 
         offsetUniforms.delta = { value: 0.0 };
         offsetUniforms.newPos = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
-        offsetUniforms.updated = updated;
+        offsetUniforms.updated = updatedUniform;
 
         velocityUniforms.delta = { value: 0.0 };
-        velocityUniforms.updated = updated;
+        velocityUniforms.updated = updatedUniform;
+        velocityUniforms.accel = { value: this.constantAcceleration };
         velocityUniforms.newVel = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
+        velocityUniforms.physicsAttractors = {
+            properties: { position: {}, strength: {}, radius: {}, decay: {} },
+            value: physObjs
+        };
 
-        this.velocityVar.wrapS = THREE.RepeatWrapping;
-        this.velocityVar.wrapT = THREE.RepeatWrapping;
-        this.offsetVar.wrapS = THREE.RepeatWrapping;
-        this.offsetVar.wrapT = THREE.RepeatWrapping;
+        velocityVar.wrapS = THREE.RepeatWrapping;
+        velocityVar.wrapT = THREE.RepeatWrapping;
+        offsetVar.wrapS = THREE.RepeatWrapping;
+        offsetVar.wrapT = THREE.RepeatWrapping;
 
         let error = gpuCompute.init();
         if ( error !== null ) {
        		console.error( error );
-        }
+        };
+
+        this.gpuCompute = gpuCompute;
+        this.offsetVar = offsetVar;
+        this.velocityVar = velocityVar;
 
     },
 
@@ -454,22 +483,12 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         let particleMat;
 
-        physObjs = [{ position: new THREE.Vector3( 1, 1, 1 ), strength: -4, radius: 5, decay: 2 },
-                    { position: new THREE.Vector3( -3, -1, -1 ), strength: 1, radius: 5, decay: 2 }];
-
         let uniforms = {
             'uTime': {
                 value: 0.0
             },
-            'physicsAttractors': {
-                properties: { position: {}, strength: {}, radius: {}, decay: {} },
-                value: physObjs
-            },
             'attenSize' : {
                 value: true
-            },
-            'accel': {
-                value: new THREE.Vector3( 0, -2, 0 )
             },
             'textureOffset': {
                 value: this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture
@@ -482,7 +501,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         let defines = [
             {
                 name: "PHYS_ENABLED",
-                value: this.params.ENABLE_PHYSICS
+                value: this.enablePhysics
             }
         ];
 
@@ -529,46 +548,49 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     spawnParticle: function(){
 
+        const varyAttribute = attr => attr * THREE.Math.randFloat( -1, 1 );
         const i = this.ACTIVE_PARTICLE;
 
+        this.offsetVar.material.uniforms.updated.value.image.data[ i * 3 ] = 1;
         this._offset = this._offset === null ? i : this._offset;
         this._count++;
 
         const referenceAttribute =  this.points.geometry.getAttribute( 'reference' );
-        const offsetAttribute =     this.points.geometry.getAttribute( 'offset' );
         const birthTimeAttribute =  this.points.geometry.getAttribute( 'birthTime' );
-        const velocityAttribute =   this.points.geometry.getAttribute( 'velocity' );
         const colourAttribute =     this.points.geometry.getAttribute( 'color' );
         const sizeAttribute =       this.points.geometry.getAttribute( 'size' );
         const lifetimeAttribute =   this.points.geometry.getAttribute( 'lifetime' );
 
-        const colour = this.params.INIT_COL.clone();
 
         referenceAttribute.array[ i * 2 ] = ( i % this.gpuCompute.texSize ) / this.gpuCompute.texSize;
         referenceAttribute.array[ i * 2 + 1 ] = ~~( i / this.gpuCompute.texSize ) / this.gpuCompute.texSize;
 
+
+        //Position
         let [ position, normal ] = this.calcOffset( this.params.INIT_POS.clone() );
 
-        let updated = this.offsetVar.material.uniforms.updated.value.image.data;
         let newPos = this.offsetVar.material.uniforms.newPos.value.image.data;
-        let newVel = this.velocityVar.material.uniforms.newVel.value.image.data;
 
-        updated[ i * 3 ] = 1;
-        newPos[ i * 3     ] = position.x + this.params.VAR_POS.x * THREE.Math.randFloat( -1, 1 );
-        newPos[ i * 3 + 1 ] = position.y + this.params.VAR_POS.y * THREE.Math.randFloat( -1, 1 );
-        newPos[ i * 3 + 2 ] = position.z + this.params.VAR_POS.z * THREE.Math.randFloat( -1, 1 );
+        newPos[ i * 3     ] = position.x + varyAttribute( this.params.VAR_POS.x );
+        newPos[ i * 3 + 1 ] = position.y + varyAttribute( this.params.VAR_POS.y );
+        newPos[ i * 3 + 2 ] = position.z + varyAttribute( this.params.VAR_POS.z );
+
 
         //Velocity
-        newVel[ i * 3     ] = this.params.INIT_VEL.x + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.x + this.params.VAR_VEL.x * THREE.Math.randFloat( -1, 1 );
-        newVel[ i * 3 + 1 ] = this.params.INIT_VEL.y + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.y + this.params.VAR_VEL.y * THREE.Math.randFloat( -1, 1 );
-        newVel[ i * 3 + 2 ] = this.params.INIT_VEL.z + this.params.NORM_VEL * ( 1- this.params.VAR_NORM_VEL * THREE.Math.randFloat( -1, 1 ) ) * normal.z + this.params.VAR_VEL.z * THREE.Math.randFloat( -1, 1 );
+        let newVel = this.velocityVar.material.uniforms.newVel.value.image.data;
+
+        newVel[ i * 3     ] = this.params.INIT_VEL.x + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.x + varyAttribute( this.params.VAR_VEL.x );
+        newVel[ i * 3 + 1 ] = this.params.INIT_VEL.y + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.y + varyAttribute( this.params.VAR_VEL.y );
+        newVel[ i * 3 + 2 ] = this.params.INIT_VEL.z + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.z + varyAttribute( this.params.VAR_VEL.z );
 
 
         //Colour
-        colour.x = THREE.Math.clamp( colour.x + this.params.VAR_COL.x * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.y = THREE.Math.clamp( colour.y + this.params.VAR_COL.y * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.z = THREE.Math.clamp( colour.z + this.params.VAR_COL.z * THREE.Math.randFloat( -1, 1 ), 0, 1 );
-        colour.w = THREE.Math.clamp( colour.w + this.params.VAR_COL.w * THREE.Math.randFloat( -1, 1 ), 0, 1 );
+        const colour = this.initColour.clone();
+
+        colour.x = THREE.Math.clamp( colour.x + varyAttribute( this.params.VAR_COL.x ), 0, 1 );
+        colour.y = THREE.Math.clamp( colour.y + varyAttribute( this.params.VAR_COL.y ), 0, 1 );
+        colour.z = THREE.Math.clamp( colour.z + varyAttribute( this.params.VAR_COL.z ), 0, 1 );
+        colour.w = THREE.Math.clamp( colour.w + varyAttribute( this.params.VAR_COL.w ), 0, 1 );
 
         colourAttribute.array[ i * 4     ] = colour.x;
         colourAttribute.array[ i * 4 + 1 ] = colour.y;
@@ -576,8 +598,8 @@ Object.assign( THREE.ParticleSystem.prototype, {
         colourAttribute.array[ i * 4 + 3 ] = colour.w;
 
         // size, lifetime and starttime
-        sizeAttribute.array[ i ] = this.params.SIZE + THREE.Math.randFloat( -1, 1 ) * this.params.VAR_SIZE;
-        lifetimeAttribute.array[ i ] = this.params.LIFETIME + THREE.Math.randFloat( -1, 1 ) * this.params.VAR_LIFETIME;
+        sizeAttribute.array[ i ] = this.params.SIZE + varyAttribute( this.params.VAR_SIZE );
+        lifetimeAttribute.array[ i ] = this.params.LIFETIME + varyAttribute( this.params.VAR_LIFETIME );
         birthTimeAttribute.array[ i ] = this.TIME;
 
         this.ACTIVE_PARTICLE = this.ACTIVE_PARTICLE >= this._softParticleLimit ? 0 : this.ACTIVE_PARTICLE + 1;
@@ -630,16 +652,14 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         this.updateGeo();
 
-        this.gpuCompute.variables[0].material.uniforms.delta.value = delta;
-        this.gpuCompute.variables[1].material.uniforms.delta.value = delta;
+        this.offsetVar.material.uniforms.delta.value = delta;
+        this.velocityVar.material.uniforms.delta.value = delta;
 
         this.gpuCompute.compute();
 
         this.points.material.uniforms.uTime.value = this.TIME;
         this.points.material.uniforms.textureOffset.value = this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture;
         this.points.material.uniforms.textureVelocity.value = this.gpuCompute.getCurrentRenderTarget( this.velocityVar ).texture;
-
-
 
     },
 
@@ -1103,7 +1123,47 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
     },
 
+    "constantAcceleration": {
+
+        get: function(){ return this.params.CONST_ACCEL },
+
+        set: function( value ){
+
+            if( !( value instanceof THREE.Vector3 ) ){ console.warn( "Needs to be THREE.Vector3!" ); return; }
+            this.params.CONST_ACCEL = value;
+            this.velocityVar.material.uniforms.accel = value;
+
+        }
+
+    },
+
 })
+
+
+THREE.ForceCarrier = function( type, mass, strength, radius, showHelper ){
+
+    this.type = type;
+    this.mass = mass;
+    this.strength = strength;
+    this.radius = radius;
+    this.showHelper= showHelper !== undefined ? showHelper : true;
+
+
+
+};
+
+THREE.ForceCarrier.prototype = Object.create( THREE.Object3D.prototype );
+THREE.ForceCarrier.prototype.constructor = THREE.ForceCarrier;
+
+Object.assign( THREE.ForceCarrier.prototype, {
+
+    drawHelper: function(){
+
+        this.add( new THREE.SphereHelper() );
+
+    }
+
+});
 
 THREE.Geometry.prototype.computeVertexNormals_New = function ( areaWeighted ) {
 
