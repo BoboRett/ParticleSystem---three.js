@@ -1,18 +1,129 @@
-THREE.ParticleSystem = function( source, options ){
+THREE.ParticleSystem = function( options ){
+
+    THREE.Object3D.apply( this, arguments );
 
     options = options || {};
 
     this.GUI;
 
-    THREE.ShaderChunk.gpuparticle_pars = "\nattribute vec2 reference;\nattribute vec3 offset;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute vec3 velocity;\nattribute float size;\nuniform float uTime;\nuniform vec3 accel;\nuniform bool attenSize;\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n";
+    THREE.ShaderChunk.gpuparticle_pars = "\nattribute vec2 reference;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute float size;\nuniform float uTime;\nuniform bool attenSize;\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n";
 
-    THREE.ShaderChunk.begin_vertex_modified = "\nfloat t = uTime - birthTime;\n#ifdef PHYS_ENABLED\nvec3 finalPosition = position + texture2D( textureOffset, reference ).xyz;\n#endif\n#ifndef PHYS_ENABLED\nvec3 finalPosition = position + offset + velocity * t;\n#endif\nvec3 transformed = vec3( finalPosition );\n";
+    THREE.ShaderChunk.begin_vertex_modified = "\nfloat t = uTime - birthTime;\nvec3 finalPosition = position * size + texture2D( textureOffset, reference ).xyz;\nvec3 transformed = vec3( finalPosition );\n";
 
     THREE.ShaderChunk.morphtarget_vertex_modified = "#ifdef USE_MORPHTARGETS\n\ttransformed += ( morphTarget0 - finalPosition ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - finalPosition ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - finalPosition ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - finalPosition ) * morphTargetInfluences[ 3 ];\n\t#ifndef USE_MORPHNORMALS\n\ttransformed += ( morphTarget4 - finalPosition ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - finalPosition ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - finalPosition ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - finalPosition ) * morphTargetInfluences[ 7 ];\n\t#endif\n#endif\n";
 
-    THREE.ShaderChunk.physics_attractor_pars = "";
+    THREE.ShaderChunk.GPU_Physics_Offset_Frag = `
+        uniform float delta;
+        uniform sampler2D updated;
+        uniform sampler2D newPos;
+        uniform sampler2D newVel;
 
-    THREE.ShaderChunk.physics_attractor_vertex = ``;
+        void main() {
+
+            vec2 uv = gl_FragCoord.xy / resolution.xy;
+            vec4 tmpPos = texture2D( textureOffset, uv );
+            vec4 velocity = texture2D( textureVelocity, uv );
+
+            float isUpdated = texture2D( updated, uv ).x;
+            if( isUpdated > 0.0 ){
+                tmpPos = texture2D( newPos, uv );
+                velocity = texture2D( newVel, uv );
+            }
+
+            vec3 position = tmpPos.xyz;
+
+            gl_FragColor = vec4( position + velocity.xyz * delta, 1 );
+
+        }
+    `;
+
+    THREE.ShaderChunk.GPU_Physics_Velocity_Frag = `
+
+        const float G = 6.67E-11;
+        const float k_e = 9.0E9;
+
+        uniform float delta;
+        uniform sampler2D textureMass;
+        uniform sampler2D updated;
+        uniform sampler2D newPos;
+        uniform sampler2D newVel;
+
+        #if ( NUM_CONST_PHYS_ATTR > 0 )
+            struct ConstantForceField {
+                    vec3 direction;
+                    float magnitude;
+                };
+            uniform ConstantForceField forcefields_const[ NUM_CONST_PHYS_ATTR ];
+        #endif
+        #if ( NUM_GRAV_PHYS_ATTR > 0 )
+            struct GravForceField {
+                    vec3 position;
+                    float mass;
+                    float decay;
+                };
+            uniform GravForceField forcefields_grav[ NUM_GRAV_PHYS_ATTR ];
+        #endif
+        #if ( NUM_COUL_PHYS_ATTR > 0 )
+            struct CoulForceField {
+                    vec3 position;
+                    float charge;
+                    float decay;
+                };
+            uniform CoulForceField forcefields_coul[ NUM_COUL_PHYS_ATTR ];
+        #endif
+
+        void main() {
+
+            vec2 uv = gl_FragCoord.xy / resolution.xy;
+            vec4 uVel = texture2D( textureVelocity, uv );
+            vec4 COM = texture2D( textureOffset, uv );
+            vec3 resForce = vec3( 0, 0, 0 );
+
+            float mass = texture2D( textureMass, uv ).x;
+
+            float isUpdated = texture2D( updated, uv ).x;
+            if( isUpdated > 0.0 ){
+                uVel = texture2D( newVel, uv );
+                COM = texture2D( newPos, uv );
+            }
+
+            #if NUM_CONST_PHYS_ATTR > 0
+                ConstantForceField forcefield_const;
+                #pragma unroll_loop
+                    for ( int i = 0; i < NUM_CONST_PHYS_ATTR; i ++ ) {
+                        forcefield_const = forcefields_const[ i ];
+                        resForce += forcefield_const.direction * forcefield_const.magnitude / mass;
+                    }
+            #endif
+
+            #if NUM_GRAV_PHYS_ATTR > 0
+                GravForceField forcefield_grav;
+                vec3 radius;
+                #pragma unroll_loop
+                    for ( int i = 0; i < NUM_GRAV_PHYS_ATTR; i ++ ) {
+                        forcefield_grav = forcefields_grav[ i ];
+                        radius = COM.xyz - forcefield_grav.position;
+                        resForce += - G * normalize( radius ) * forcefield_grav.mass * mass / pow( length( radius ), forcefield_grav.decay );
+                    }
+            #endif
+
+            #if NUM_COUL_PHYS_ATTR > 0
+                CoulForceField forcefield_coul;
+                #pragma unroll_loop
+                    for ( int i = 0; i < NUM_COUL_PHYS_ATTR; i ++ ) {
+                        forcefield_coul = forcefields_grav[ i ];
+                        distance = COM.xyz - forcefield_coul.position;
+                        if( length( distance ) < forcefield_coul.radius ){
+                            resForce += normalize( distance ) * forcefield_coul.strength * ( forcefield_coul.radius - length( distance ) ) / ( forcefield_coul.radius * pow( length( distance ), forcefield_coul.decay ) );
+                        }
+                    }
+            #endif
+
+            vec3 vVel = uVel.xyz + ( resForce / mass ) * delta;
+            gl_FragColor = vec4( vVel, 1 );
+
+        }
+    `;
 
     this.params = {
 
@@ -23,7 +134,7 @@ THREE.ParticleSystem = function( source, options ){
         SPAWN_RATE: options.spawnRate !== undefined ? options.spawnRate : 100,
         ANIMATE_SPAWN: false, //Less memory efficient, stops rebuilding on spawn value change
 
-        SPAWN_EMITFROM: "face", //origin, vert, face, volume
+        SPAWN_EMITFROM: "face", //origin, vert, face, volume(WIP)
         SPAWN_ELDISTRIB: "random", //index, random,
         SPAWN_INDEX: 0,
         SPAWN_EMDISTRIB: "random", //centre, random(WIP) //grid(future job)//,
@@ -53,7 +164,6 @@ THREE.ParticleSystem = function( source, options ){
 
         //Physics
         ENABLE_PHYSICS : true,
-        CONST_ACCEL: options.constantAcceleration !== undefined ? options.constantAcceleration : new THREE.Vector3( 0, -2, 0 ),
 
     }
 
@@ -61,6 +171,8 @@ THREE.ParticleSystem = function( source, options ){
     this.PARTICLE_LIMIT_REACHED = false;
 
     this.TIME = 0;
+
+    this.forceCarriers = { 0: [], 1: [], 2: [] };
 
     this._rateCounter = 0;
     this._offset = 0;
@@ -82,9 +194,7 @@ THREE.ParticleSystem = function( source, options ){
 
             if( age >= 0. && age < lifetime ){
 
-                #include <begin_vertex_modified>
-
-                vec4 mvPosition = modelViewMatrix * vec4( transformed, 1.0 );
+                vec4 mvPosition = modelViewMatrix * vec4( ( position + texture2D( textureOffset, reference ).xyz ), 1.0 );
 
                 gl_PointSize = size;
 
@@ -114,16 +224,11 @@ THREE.ParticleSystem = function( source, options ){
         }
     `;
 
-    THREE.Object3D.apply( this, arguments );
-
-    this.source = source;
-    this.source.material.side = THREE.DoubleSide; //REQUIRED FOR RAYCASTING DURING SPAWN
-    this.source.geometry.computeBoundingBox();
-    this.source.add( this );
 
     this.raycaster = new THREE.Raycaster();
 
-    this.showOptions = options.showOptions !== undefined ? options.showOptions : false;
+    this.DPR = window.devicePixelRatio;
+    this.isParticleSystem = true;
 
     this.init();
 
@@ -144,93 +249,27 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.rateCounter = 0;
         this.TIME = 0;
 
-        if( this.points ){
-
-            this.points.geometry.dispose();
-            this.points.material.dispose();
-
-        }
+        if( this.points ){ this.dispose(); };
 
         this.remove( this.points );
-        this.points = this.params.DISPLAY_MODE === "object" && this.instanceObject ? new THREE.Mesh( this.refreshGeo(), this.refreshMaterial() ) : new THREE.Points( this.refreshGeo(), this.refreshMaterial() );
+        this.points = this.params.DISPLAY_MODE === "object" && this.instanceObject ? new THREE.Mesh() : new THREE.Points();
+        this.refreshPoints();
+
         this.add( this.points );
 
     },
 
-    initComputeRenderer: function(){
+    refreshPoints: function(){
 
-        let fragmentOffset = `
-            uniform float delta;
-            uniform sampler2D updated;
-            uniform sampler2D newPos;
+        this.refreshGeo();
+        this.refreshMaterial();
 
-            void main() {
+    },
 
-                vec2 uv = gl_FragCoord.xy / resolution.xy;
-                vec4 tmpPos = texture2D( textureOffset, uv );
+    initComputeRenderer: function( rewrite ){
 
-                vec4 isUpdated = texture2D( updated, uv );
-                if( isUpdated.x > 0.0 ){
-                    tmpPos = texture2D( newPos, uv );
-                }
-
-                vec3 position = tmpPos.xyz;
-                vec3 velocity = texture2D( textureVelocity, uv ).xyz;
-
-                gl_FragColor = vec4( position + velocity * delta, 1 );
-
-            }
-        `;
-
-        let fragmentVelocity = `
-            uniform float delta;
-            uniform vec3 accel;
-            uniform sampler2D updated;
-            uniform sampler2D newVel;
-
-            #if ( NUM_PHYS_ATTR > 0 )
-                struct PhysicsAttractor {
-                        vec3 position;
-                        float strength;
-                        float radius;
-                        float decay;
-                    };
-                uniform PhysicsAttractor physicsAttractors[ NUM_PHYS_ATTR ];
-            #endif
-
-
-            void main() {
-
-                vec2 uv = gl_FragCoord.xy / resolution.xy;
-                vec3 uVel = texture2D( textureVelocity, uv ).xyz;
-                vec4 COM = texture2D( textureOffset, uv );
-
-                vec4 isUpdated = texture2D( updated, uv );
-                if( isUpdated.x > 0.0 ){
-                    uVel = texture2D( newVel, uv ).xyz;
-                }
-                vec3 vVel = uVel;
-
-                #if NUM_PHYS_ATTR > 0
-                    PhysicsAttractor physicsAttractor;
-                    vec3 distance;
-                    #pragma unroll_loop
-                        for ( int i = 0; i < NUM_PHYS_ATTR; i ++ ) {
-                                physicsAttractor = physicsAttractors[ i ];
-                                distance = COM.xyz - physicsAttractor.position;
-                                if( length( distance ) < physicsAttractor.radius ){
-                                    vVel += normalize( distance ) * physicsAttractor.strength * ( physicsAttractor.radius - length( distance ) ) / ( physicsAttractor.radius * pow( length( distance ), physicsAttractor.decay ) );
-                                }
-
-                        }
-                #endif
-
-                gl_FragColor = vec4( vVel + accel * delta, 1 );
-
-            }
-        `;
-
-        let physObjs = [{ position: new THREE.Vector3( 1, 1, 1 ), strength: -0.1, radius: 7, decay: 2 }];
+        let physObjs = this.enablePhysics ? this.forceCarriers : [];
+        const Velocity_Frag = THREE.ShaderChunk.GPU_Physics_Velocity_Frag.replace( /NUM_CONST_PHYS_ATTR/g, physObjs[0].length ).replace( /NUM_GRAV_PHYS_ATTR/g, physObjs[1].length ).replace( /NUM_COUL_PHYS_ATTR/g, physObjs[2].length );
 
         let texSize = Math.pow( 2, Math.ceil( Math.log2( Math.sqrt( this._softParticleLimit ) ) ) );
         let gpuCompute = new GPUComputationRenderer( texSize, texSize, renderer );
@@ -239,40 +278,75 @@ Object.assign( THREE.ParticleSystem.prototype, {
         let dataOffset = gpuCompute.createTexture();
         let dataVelocity = gpuCompute.createTexture();
 
-        let offsetVar = gpuCompute.addVariable( "textureOffset", fragmentOffset, dataOffset );
-        let velocityVar = gpuCompute.addVariable( "textureVelocity", fragmentVelocity.replace( /NUM_PHYS_ATTR/g, physObjs.length ), dataVelocity );
-
-        gpuCompute.setVariableDependencies( offsetVar, [ velocityVar, offsetVar ] );
-        gpuCompute.setVariableDependencies( velocityVar, [ velocityVar, offsetVar ] );
-
-        let updatedUniform = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType )};
-
-        let offsetUniforms = offsetVar.material.uniforms;
-        let velocityUniforms = velocityVar.material.uniforms;
-
-        offsetUniforms.delta = { value: 0.0 };
-        offsetUniforms.newPos = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
-        offsetUniforms.updated = updatedUniform;
-
-        velocityUniforms.delta = { value: 0.0 };
-        velocityUniforms.updated = updatedUniform;
-        velocityUniforms.accel = { value: this.constantAcceleration };
-        velocityUniforms.newVel = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
-        velocityUniforms.physicsAttractors = {
-            properties: { position: {}, strength: {}, radius: {}, decay: {} },
-            value: physObjs
-        };
+        let offsetVar = gpuCompute.addVariable( "textureOffset", THREE.ShaderChunk.GPU_Physics_Offset_Frag, dataOffset );
+        let velocityVar = gpuCompute.addVariable( "textureVelocity", Velocity_Frag, dataVelocity );
 
         velocityVar.wrapS = THREE.RepeatWrapping;
         velocityVar.wrapT = THREE.RepeatWrapping;
         offsetVar.wrapS = THREE.RepeatWrapping;
         offsetVar.wrapT = THREE.RepeatWrapping;
 
-        let error = gpuCompute.init();
-        if ( error !== null ) {
-       		console.error( error );
+        gpuCompute.setVariableDependencies( offsetVar, [ velocityVar, offsetVar ] );
+        gpuCompute.setVariableDependencies( velocityVar, [ velocityVar, offsetVar ] );
+
+        let updated, newVel, newPos, mass;
+        let updatedUniform, newVelUniform, newPosUniform, massUniform;
+
+        if( !this.gpuCompute || rewrite ){
+
+            updated = new Uint8Array( Math.pow( texSize, 2 ) * 3 );
+            newVel = new Float32Array( Math.pow( texSize, 2 ) * 3 );
+            newPos = new Float32Array( Math.pow( texSize, 2 ) * 3 );
+            mass = new Float32Array( Math.pow( texSize, 2 ) * 3 );
+
+        } else{
+
+            updated = new Uint8Array( Math.pow( texSize, 2 ) * 3 )
+            updated.set( this.offsetVar.material.uniforms.updated.value.image.data );
+            newVel = new Float32Array( Math.pow( texSize, 2 ) * 3 )
+            newVel.set( this.offsetVar.material.uniforms.newVel.value.image.data );
+            newPos = new Float32Array( Math.pow( texSize, 2 ) * 3 )
+            newPos.set( this.offsetVar.material.uniforms.newPos.value.image.data );
+            mass = new Float32Array( Math.pow( texSize, 2 ) * 3 )
+            mass.set( this.velocityVar.material.uniforms.textureMass.value.image.data );
+
+        }
+
+        updatedUniform = { value: new THREE.DataTexture( updated, texSize, texSize, THREE.RGBFormat )};
+        newVelUniform = { value: new THREE.DataTexture( newVel, texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
+        newPosUniform = { value: new THREE.DataTexture( newPos, texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
+        massUniform = { value: new THREE.DataTexture( mass, texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
+
+        let offsetUniforms = offsetVar.material.uniforms;
+        let velocityUniforms = velocityVar.material.uniforms;
+
+        offsetUniforms.delta = { value: 0.0 };
+        offsetUniforms.newPos = newPosUniform;
+        offsetUniforms.newVel = newVelUniform;
+        offsetUniforms.updated = updatedUniform;
+
+        velocityUniforms.delta = { value: 0.0 };
+        velocityUniforms.updated = updatedUniform;
+        velocityUniforms.newPos = newPosUniform;
+        velocityUniforms.newVel = newVelUniform;
+        velocityUniforms.textureMass = massUniform;
+        velocityUniforms.forcefields_const = {
+            properties: { direction: {}, magnitude: {} },
+            value: physObjs[0]
+        };
+        velocityUniforms.forcefields_grav = {
+            properties: { position: {}, mass: {}, decay: {} },
+            value: physObjs[1]
+        };
+        velocityUniforms.forcefields_coul = {
+            properties: { position: {}, charge: {}, decay: {} },
+            value: physObjs[2]
         };
 
+        let error = gpuCompute.init();
+        if ( error !== null ) {
+            console.error( error );
+        };
         this.gpuCompute = gpuCompute;
         this.offsetVar = offsetVar;
         this.velocityVar = velocityVar;
@@ -306,35 +380,35 @@ Object.assign( THREE.ParticleSystem.prototype, {
             case "origin":
 
 
-                source = this.source.position;
-                normal = this.source.up;
+                source = this.parent.position;
+                normal = this.parent.up;
                 position.add( source );
                 break;
 
             case "vert":
 
-                index = sourceIndex( this.source.geometry.vertices )
+                index = sourceIndex( this.parent.geometry.vertices )
 
-                source = this.source.geometry.vertices[ index ];
-                normal = this.source.geometry.faces.map( face => face.vertexNormals[ Object.values( face ).indexOf( index ) ] ).filter( el => el )[0];
+                source = this.parent.geometry.vertices[ index ];
+                normal = this.parent.geometry.faces.map( face => face.vertexNormals[ Object.values( face ).indexOf( index ) ] ).filter( el => el )[0];
                 position.add( source );
 
                 break;
 
             case "face":
 
-                index = sourceIndex( this.source.geometry.faces )
+                index = sourceIndex( this.parent.geometry.faces )
 
-                normal = this.source.geometry.faces[ index ].normal;
-                source = this.find3DPos( Object.values( this.source.geometry.faces[ index ] ).slice( 0, 3 ).map( vert => this.source.geometry.vertices[ vert ] ), normal.clone() );
+                normal = this.parent.geometry.faces[ index ].normal;
+                source = this.find3DPos( Object.values( this.parent.geometry.faces[ index ] ).slice( 0, 3 ).map( vert => this.parent.geometry.vertices[ vert ] ), normal.clone() );
                 position.add( source );
 
                 break;
 
             case "volume":
 
-                normal = this.source.up;
-                source = this.find3DPos( this.source.geometry.vertices, normal.clone() );
+                normal = this.parent.up;
+                source = this.find3DPos( this.parent.geometry.vertices, normal.clone() );
                 position.add( source );
                 break;
 
@@ -376,12 +450,12 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
                         genPos = () => {
 
-                            const tmp = new THREE.Vector3().subVectors( this.source.geometry.boundingBox.max, this.source.geometry.boundingBox.min )
+                            const tmp = new THREE.Vector3().subVectors( this.parent.geometry.boundingBox.max, this.parent.geometry.boundingBox.min )
                             tmp.x = tmp.x * Math.random();
                             tmp.y = tmp.y * Math.random();
                             tmp.z = tmp.z * Math.random();
 
-                            return tmp.add( this.source.geometry.boundingBox.min );
+                            return tmp.add( this.parent.geometry.boundingBox.min );
 
                         };
 
@@ -392,7 +466,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
                 pos = genPos();
                 this.raycaster.set( pos, normal.clone().negate() );
 
-                while( this.raycaster.intersectObject( this.source ).length === 0 ) {
+                while( this.raycaster.intersectObject( this.parent ).length === 0 ) {
 
                     pos = genPos();
                     this.raycaster.set( pos, normal.clone().negate() );
@@ -404,6 +478,19 @@ Object.assign( THREE.ParticleSystem.prototype, {
         }
 
         return pos
+
+    },
+
+    assignForceCarrier: function( value ){
+
+        if( value.isForceCarrier ) this.forceCarriers[value.type].push( value );
+        this.initComputeRenderer();
+
+    },
+
+    removeForceCarrier: function( value ){
+
+        this.forceCarriers.splice( this.forceCarriers.indexOf( value ), 1 );
 
     },
 
@@ -469,12 +556,11 @@ Object.assign( THREE.ParticleSystem.prototype, {
         }
 
         particleGeo.addAttribute( 'reference',  attrBuilder( this._softParticleLimit, 2 ) );
-        particleGeo.addAttribute( 'offset',     attrBuilder( this._softParticleLimit, 3 ) );
         particleGeo.addAttribute( 'birthTime',  attrBuilder( this._softParticleLimit, 1 ) );
-        particleGeo.addAttribute( 'velocity',   attrBuilder( this._softParticleLimit, 3 ) );
         particleGeo.addAttribute( 'size',       attrBuilder( this._softParticleLimit, 1 ) );
         particleGeo.addAttribute( 'lifetime',   attrBuilder( this._softParticleLimit, 1 ) );
 
+        this.points.geometry = particleGeo;
         return particleGeo;
 
     },
@@ -498,13 +584,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
             }
         };
 
-        let defines = [
-            {
-                name: "PHYS_ENABLED",
-                value: this.enablePhysics
-            }
-        ];
-
         if( this.params.DISPLAY_MODE === "object" && this.instanceObject ){
 
             particleMat = this.instanceObject.material.clone();
@@ -513,9 +592,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             particleMat.onBeforeCompile = ( shader, renderer ) => {
 
-                shader.vertexShader = defines.map( define => define.value ? "#define " + define.name : "\n" ).join( "" ) + "\n#include <gpuparticle_pars>\n" + shader.vertexShader.replace( "begin_vertex", "begin_vertex_modified" ).replace( "morphtarget_vertex", "morphtarget_vertex_modified" );
-
-                //shader.fragmentShader = "boop" + shader.fragmentShader;
+                shader.vertexShader = "\n#include <gpuparticle_pars>\n" + shader.vertexShader.replace( "begin_vertex", "begin_vertex_modified" ).replace( "morphtarget_vertex", "morphtarget_vertex_modified" );
 
                 shader.uniforms = Object.assign( shader.uniforms, uniforms );
 
@@ -525,7 +602,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             particleMat =  new THREE.ShaderMaterial( {
 
-                                        vertexShader: defines.map( define => define.value ? "#define " + define.name : "\n" ).join( "" ) + this.VERTEX_SHADER,
+                                        vertexShader: this.VERTEX_SHADER,
                                         fragmentShader: this.FRAG_SHADER,
                                         uniforms: uniforms,
                                         blending: THREE.NormalBlending,
@@ -535,6 +612,9 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
 
         }
+
+        if( this.points.material ){ this.points.material.dispose();}
+        this.points.material = particleMat;
 
         return particleMat
 
@@ -562,40 +642,39 @@ Object.assign( THREE.ParticleSystem.prototype, {
         const lifetimeAttribute =   this.points.geometry.getAttribute( 'lifetime' );
 
 
+        //Texture Reference
         referenceAttribute.array[ i * 2 ] = ( i % this.gpuCompute.texSize ) / this.gpuCompute.texSize;
         referenceAttribute.array[ i * 2 + 1 ] = ~~( i / this.gpuCompute.texSize ) / this.gpuCompute.texSize;
 
 
-        //Position
         let [ position, normal ] = this.calcOffset( this.params.INIT_POS.clone() );
 
+        //Position
         let newPos = this.offsetVar.material.uniforms.newPos.value.image.data;
 
-        newPos[ i * 3     ] = position.x + varyAttribute( this.params.VAR_POS.x );
-        newPos[ i * 3 + 1 ] = position.y + varyAttribute( this.params.VAR_POS.y );
-        newPos[ i * 3 + 2 ] = position.z + varyAttribute( this.params.VAR_POS.z );
-
+        Object.keys( position ).forEach( ( dim, j ) => {
+            newPos[ i * 3 + j ] = position[dim] + varyAttribute( this.params.VAR_POS[dim] );
+        });
 
         //Velocity
         let newVel = this.velocityVar.material.uniforms.newVel.value.image.data;
 
-        newVel[ i * 3     ] = this.params.INIT_VEL.x + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.x + varyAttribute( this.params.VAR_VEL.x );
-        newVel[ i * 3 + 1 ] = this.params.INIT_VEL.y + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.y + varyAttribute( this.params.VAR_VEL.y );
-        newVel[ i * 3 + 2 ] = this.params.INIT_VEL.z + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal.z + varyAttribute( this.params.VAR_VEL.z );
-
+        Object.keys( this.params.INIT_VEL ).forEach( ( dim, j ) => {
+            newVel[ i * 3 + j ] = this.params.INIT_VEL[dim] + this.params.NORM_VEL * ( 1 - varyAttribute( this.params.VAR_NORM_VEL ) ) * normal[dim] + varyAttribute( this.params.VAR_VEL[dim] );
+        });
 
         //Colour
         const colour = this.initColour.clone();
 
-        colour.x = THREE.Math.clamp( colour.x + varyAttribute( this.params.VAR_COL.x ), 0, 1 );
-        colour.y = THREE.Math.clamp( colour.y + varyAttribute( this.params.VAR_COL.y ), 0, 1 );
-        colour.z = THREE.Math.clamp( colour.z + varyAttribute( this.params.VAR_COL.z ), 0, 1 );
-        colour.w = THREE.Math.clamp( colour.w + varyAttribute( this.params.VAR_COL.w ), 0, 1 );
+        Object.keys( colour ).forEach( ( dim, j ) => {
 
-        colourAttribute.array[ i * 4     ] = colour.x;
-        colourAttribute.array[ i * 4 + 1 ] = colour.y;
-        colourAttribute.array[ i * 4 + 2 ] = colour.z;
-        colourAttribute.array[ i * 4 + 3 ] = colour.w;
+            colour[dim] = THREE.Math.clamp( colour[dim] + varyAttribute( this.params.VAR_COL[dim] ), 0, 1 );
+            colourAttribute.array[ i * 4 + j ] = colour[dim];
+
+        });
+
+        //Mass
+        this.velocityVar.material.uniforms.textureMass.value.image.data[ i * 3 ] = 1.0;
 
         // size, lifetime and starttime
         sizeAttribute.array[ i ] = this.params.SIZE + varyAttribute( this.params.VAR_SIZE );
@@ -610,7 +689,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         if( this._count < 1 ) return;
 
-        ['reference', 'offset', 'birthTime', 'velocity', 'color', 'size', 'lifetime'].forEach( attrName => {
+        ['reference', 'birthTime', 'color', 'size', 'lifetime'].forEach( attrName => {
 
             const attr = this.points.geometry.getAttribute( attrName );
 
@@ -624,10 +703,13 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.offsetVar.material.uniforms.updated.value.needsUpdate = true;
         this.offsetVar.material.uniforms.newPos.value.needsUpdate = true;
         this.velocityVar.material.uniforms.newVel.value.needsUpdate = true;
+        this.velocityVar.material.uniforms.textureMass.value.needsUpdate = true;
 
     },
 
     update: function(){
+
+        if( !this.parent ){ console.warn( "No parent object!" ); return; };
 
         const delta = clock.getDelta() * this.params.TIME_SCALE;
 
@@ -635,7 +717,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this._count = 0;
         this._offset = null;
         this.offsetVar.material.uniforms.updated.value.image.data.fill( 0 );
-
 
         if( this.TIME < 0 ) this.TIME = 0;
 
@@ -665,12 +746,16 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     dispose: function () {
 
-		this.points.geometry.dispose();
-		this.points.material.dispose();
+        this.points.geometry.dispose();
+        this.points.geometry = null;
+        this.points.material.dispose();
+        this.points.material = null;
 
 	},
 
     buildOptions: function(){
+
+        if( !this.parent ){ console.warn( "No parent object!" ); return; };
 
         let gui = new dat.GUI();
         this.GUI = gui;
@@ -707,7 +792,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         emitter.add( this, "animateSpawn" ).onChange( () => this.init( true ) );
 
         let source = emitter.addFolder( "Source" );
-        const assertEmitIndex = () => assertNumericController( source, "emitIndex", ["vert","face"].includes( this.emitFrom ) && this.elementDistribution === "index", 0, ( this.emitFrom === "vert" ? this.source.geometry.vertices.length : this.source.geometry.faces.length ) - 1 );
+        const assertEmitIndex = () => assertNumericController( source, "emitIndex", ["vert","face"].includes( this.emitFrom ) && this.elementDistribution === "index", 0, ( this.emitFrom === "vert" ? this.parent.geometry.vertices.length : this.parent.geometry.faces.length ) - 1 );
         const assertEmitDistribution = () => assertStringController( source, "emitDistribution", ["face","volume"].includes( this.emitFrom ), { Centre: "centre", "Random(WIP)": "random", "//Grid": "grid" } );
 
         source.add( this, "emitFrom", { Centre: "origin", Vertex: "vert", Face: "face", Volume: "volume" } ).onChange( () => {assertEmitIndex(); assertEmitDistribution()} );
@@ -740,12 +825,10 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         //////Display Settings//////
         let display = gui.addFolder( "Display" );
-        display.add( this, "displayMode", {Point: "shader", Object: "object"}).onChange( () => this.init( true ) );
+        display.add( this, "displayMode", {Point: "shader", Object: "object"});
 
         gui.add( this, "enablePhysics" );
         gui.add( this, "exportState" );
-
-
 
     },
 
@@ -756,47 +839,9 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     }
 
-
 });
 
 Object.defineProperties( THREE.ParticleSystem.prototype, {
-
-
-    "showOptions": {
-
-        get: function(){ return this.OPTIONS_PANEL },
-
-        set: function( value ){
-
-            this.OPTIONS_PANEL = value;
-
-            if( this.OPTIONS_PANEL ){
-
-                !this.GUI && this.buildOptions();
-
-            } else{
-
-                this.GUI && this.removeOptions();
-
-            }
-
-        }
-
-    },
-
-    "source": {
-
-        get: function(){ return this.SOURCE },
-
-        set: function( value ){
-
-            value.geometry.computeVertexNormals_New( true );
-            this.SOURCE = value;
-
-        }
-
-    },
-
 
     "vertexShader": {
 
@@ -916,7 +961,7 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
             this.params.SPAWN_ELDISTRIB = value;
 
-            if( this.params.SPAWN_ELDISTRIB > ( this.params.SPAWN_EMITFROM === "vert" ? this.source.geometry.vertices.length : this.source.geometry.faces.length ) - 1 ) this.emitIndex = 0;
+            if( this.params.SPAWN_ELDISTRIB > ( this.params.SPAWN_EMITFROM === "vert" ? this.parent.geometry.vertices.length : this.parent.geometry.faces.length ) - 1 ) this.emitIndex = 0;
 
         }
 
@@ -949,7 +994,7 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
         set: function( value ){
 
-            this.params.SIZE = value;
+            this.params.SIZE = value * this.DPR;
 
         }
 
@@ -1091,7 +1136,7 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
         set: function( value ){
 
             this.params.DISPLAY_MODE = value;
-            console.warn( "Modifying .displayMode dynamically requires a rebuild. Call .init( true ) to reinitialise Particle System.")
+            console.warn( "Modifying .displayMode dynamically requires a rebuild.")
             this.init( true );
 
         }
@@ -1117,21 +1162,7 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
         set: function( value ){
 
             this.params.ENABLE_PHYSICS = value;
-            this.init( true );
-
-        }
-
-    },
-
-    "constantAcceleration": {
-
-        get: function(){ return this.params.CONST_ACCEL },
-
-        set: function( value ){
-
-            if( !( value instanceof THREE.Vector3 ) ){ console.warn( "Needs to be THREE.Vector3!" ); return; }
-            this.params.CONST_ACCEL = value;
-            this.velocityVar.material.uniforms.accel = value;
+            this.refreshComputeRenderer();
 
         }
 
@@ -1140,15 +1171,33 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 })
 
 
-THREE.ForceCarrier = function( type, mass, strength, radius, showHelper ){
+THREE.ForceCarrier = function( options ){
 
-    this.type = type;
-    this.mass = mass;
-    this.strength = strength;
-    this.radius = radius;
-    this.showHelper= showHelper !== undefined ? showHelper : true;
+    THREE.Object3D.apply( this, arguments );
 
+    this.isForceCarrier = true;
+    this.type = options.type !== undefined ? options.type : 1;
+    this.decay = 1;
 
+    switch( this.type ){
+
+        case 0:
+            this.direction = options.direction !== undefined ? options.direction.normalize() : new THREE.Vector3( 0, -1, 0 ).normalize();
+            this.magnitude = options.magnitude !== undefined ? options.magnitude : 9.81;
+            break;
+
+        case 1:
+            this.mass = options.mass !== undefined ? options.mass : 1;
+            this.decay = options.decay !== undefined ? options.decay : 1;
+            break;
+
+        case 2:
+            this.charge = 0;
+            break;
+
+    }
+
+    options.showHelper && this.drawHelper();
 
 };
 
@@ -1159,9 +1208,46 @@ Object.assign( THREE.ForceCarrier.prototype, {
 
     drawHelper: function(){
 
-        this.add( new THREE.SphereHelper() );
+        let helperGeo;
+
+        switch( this.type ){
+
+            case 0: //Constant
+
+                helperMesh = new THREE.Mesh( new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial( { wireframe : true } ) );
+                helperMesh.up = new THREE.Vector3( 0, 0, 1 );
+                helperMesh.add( new THREE.ArrowHelper( helperMesh.up, helperMesh.position, 1, 0xffffff ) );
+                helperMesh.position.copy( this.position );
+                helperMesh.lookAt( this.direction );
+                this.add( helperMesh );
+                break;
+
+            case 1: //Gravity
+
+                helperMesh = new THREE.Mesh( new THREE.SphereGeometry( this.radius, 6, 6 ), new THREE.MeshBasicMaterial( { wireframe : true } ) );
+                helperMesh.position.copy( this.position );
+                this.add( helperMesh );
+                break;
+
+            case 2: //Coulomb
+
+                break;
+
+        }
 
     }
+
+});
+
+Object.defineProperties( THREE.ForceCarrier.prototype, {
+
+    "type": {
+
+        get: function(){ return this._type },
+
+        set: function( value ){ this._type = +value == +value? value : { "constant": 0, "gravity": 1, "coulomb": 2 }[value] }
+
+    },
 
 });
 

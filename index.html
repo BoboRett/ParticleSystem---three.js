@@ -62,8 +62,8 @@
         container.appendChild( renderer.domElement );
 		d3.select( renderer.domElement ).style( "position", "absolute" ).style( "top", 0 ).style( "left", 0 ).style( "z-index", -1 );
 
-		particleSystem = new THREE.ParticleSystem( source, {
-			size: 1,
+		particleSystem = new THREE.ParticleSystem( {
+			size: 3,
 			maxParticles: 10000,
 			spawnRate: undefined,
 			lifetime: 5,
@@ -73,6 +73,13 @@
 			//initColour: {r:1,a:0.5},
 			//varyColour: new THREE.Quaternion( 1, 0, 0, 0.3 ),
 		});
+
+		source.add( particleSystem );
+		source.geometry.computeVertexNormals_New();
+		particleSystem.buildOptions();
+		force = new THREE.ForceCarrier( { mass: 10E9, type: 1, showHelper: true } );
+		scene.add( force );
+		particleSystem.assignForceCarrier( force );
 
         controls = new THREE.TrackballControls( camera, renderer.domElement );
         controls.rotateSpeed = 5.0;
