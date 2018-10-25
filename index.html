@@ -13,7 +13,7 @@
     <script src="https://rawgit.com/mrdoob/three.js/master/examples/js/controls/TrackballControls.js"></script>
     <!--<script src="https://rawgit.com/mrdoob/three.js/master/examples/js/GPUComputationRenderer.js"></script>-->
 	<script src="https://rawgit.com/mrdoob/stats.js/master/build/stats.min.js"></script>
-	<script src="GPUParticles_Compute.js"></script>
+	<script src="GPUParticles.js"></script>
 	<script src="GPUComputationRenderer.js"></script>
 
     <script>
@@ -24,8 +24,7 @@
 
     let stats;
 
-    init();
-    animate();
+	document.addEventListener( "DOMContentLoaded", () => { init(); animate(); } );
 
     function init() {
 
@@ -63,22 +62,55 @@
 		d3.select( renderer.domElement ).style( "position", "absolute" ).style( "top", 0 ).style( "left", 0 ).style( "z-index", -1 );
 
 		particleSystem = new THREE.ParticleSystem( {
-			size: 3,
-			maxParticles: 10000,
-			spawnRate: undefined,
-			lifetime: 5,
-			showOptions: true,
+			size: 1,
+			maxParticles: 50000,
+			lifetime: 10,
+			spawnRate: 1000,
+			normalVelocity: 3,
 			instanceObject: instObj,
-			//varyVelocity: 0,
-			//initColour: {r:1,a:0.5},
-			//varyColour: new THREE.Quaternion( 1, 0, 0, 0.3 ),
+			initColour: new THREE.Quaternion( 0, 0.6, 1, 1 ),
+			varyColour: new THREE.Quaternion( 0.4, 0.4, 0, 0 )
 		});
 
 		source.add( particleSystem );
 		source.geometry.computeVertexNormals_New();
+
 		particleSystem.buildOptions();
-		force = new THREE.ForceCarrier( { mass: 10E9, type: 1, showHelper: true } );
+
+		particleSystem.physicsShaderChunks.push({
+			pars: THREE.ShaderChunk.gpup_physics.boid_pars,
+			frag: THREE.ShaderChunk.gpup_physics.boid_frag,
+			uniforms: {
+
+				'view_radius': {
+					value: 5.0
+				},
+				'separation_threshold': {
+					value : 0.01
+				},
+				'separation_strength': {
+					value: 1
+				},
+				'flock_threshold': {
+					value: 1
+				},
+				'cohesion_strength': {
+					value: 1
+				},
+				'alignment_strength': {
+					value: 1
+				}
+
+			}
+		});
+
+		particleSystem.initComputeRenderer();
+		particleSystem.addTrails( 16 );
+
+
+		force = new THREE.ForceCarrier( { strength: -1, type: 1, showHelper: true } );
 		scene.add( force );
+		force.translateX( 2 );
 		particleSystem.assignForceCarrier( force );
 
         controls = new THREE.TrackballControls( camera, renderer.domElement );

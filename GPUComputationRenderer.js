@@ -97,9 +97,10 @@
  * @param {WebGLRenderer} renderer The renderer
   */
 
-function GPUComputationRenderer( sizeX, sizeY, renderer ) {
+function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 	this.variables = [];
+	var history = history !== undefined ? history : 1;
 
 	this.currentTextureIndex = 0;
 
@@ -165,10 +166,10 @@ function GPUComputationRenderer( sizeX, sizeY, renderer ) {
 			var variable = this.variables[ i ];
 
 			// Creates rendertargets and initialize them with input texture
-			variable.renderTargets[ 0 ] = this.createRenderTarget( sizeX, sizeY, variable.wrapS, variable.wrapT, variable.minFilter, variable.magFilter );
-			variable.renderTargets[ 1 ] = this.createRenderTarget( sizeX, sizeY, variable.wrapS, variable.wrapT, variable.minFilter, variable.magFilter );
-			this.renderTexture( variable.initialValueTexture, variable.renderTargets[ 0 ] );
-			this.renderTexture( variable.initialValueTexture, variable.renderTargets[ 1 ] );
+			for( let i = 0; i <= history; i++ ){
+				variable.renderTargets[ i ] = this.createRenderTarget( sizeX, sizeY, variable.wrapS, variable.wrapT, variable.minFilter, variable.magFilter );
+				this.renderTexture( variable.initialValueTexture, variable.renderTargets[ i ] );
+			}
 
 			// Adds dependencies uniforms to the ShaderMaterial
 			var material = variable.material;
@@ -214,7 +215,7 @@ function GPUComputationRenderer( sizeX, sizeY, renderer ) {
 	this.compute = function() {
 
 		var currentTextureIndex = this.currentTextureIndex;
-		var nextTextureIndex = this.currentTextureIndex === 0 ? 1 : 0;
+		var nextTextureIndex = currentTextureIndex === history ? 0 : currentTextureIndex + 1;
 
 		for ( var i = 0, il = this.variables.length; i < il; i++ ) {
 
@@ -248,9 +249,9 @@ function GPUComputationRenderer( sizeX, sizeY, renderer ) {
 
 	};
 
-	this.getAlternateRenderTarget = function( variable ) {
+	this.getRenderTarget = function( variable, index ) {
 
-		return variable.renderTargets[ this.currentTextureIndex === 0 ? 1 : 0 ];
+		return variable.renderTargets[ index ];
 
 	};
 
@@ -335,6 +336,7 @@ function GPUComputationRenderer( sizeX, sizeY, renderer ) {
 
 		mesh.material = material;
 		renderer.render( scene, camera, output );
+
 		mesh.material = passThruShader;
 
 	};
