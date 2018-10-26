@@ -31,7 +31,7 @@
         container = document.body;
 
         camera = new THREE.PerspectiveCamera( 28, window.innerWidth / window.innerHeight, 1, 10000 );
-        camera.position.z = 100;
+        camera.position.z = 20;
 
         scene = new THREE.Scene();
 
@@ -43,6 +43,7 @@
         source = new THREE.Mesh( new THREE.CubeGeometry( 1, 1, 1 ), new THREE.MeshLambertMaterial( { color: 0xffffff, wireframe: false }) );
         scene.add( source );
 		scene.add( new THREE.FaceNormalsHelper( source ) );
+
 		var axesHelper = new THREE.AxesHelper( 5 );
 		scene.add( axesHelper );
 
@@ -63,7 +64,6 @@
 
 		particleSystem = new THREE.ParticleSystem( {
 			size: 1,
-			maxParticles: 50000,
 			lifetime: 10,
 			spawnRate: 1000,
 			normalVelocity: 3,

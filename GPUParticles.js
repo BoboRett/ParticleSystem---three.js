@@ -227,53 +227,68 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     },
 
-    buildVelocityFragment: function(){
-
-        let frag = THREE.ShaderChunk.gpup_physics_velocity_frag;
-        let shader_pars = "", shader_frag = "";
-
-        let chunks = [];
-
-        if( this.enablePhysics ) {
-
-            chunks = chunks.concat( this.physicsShaderChunks );
-
-            if( this.forceCarriers[0].length ) chunks.push({
-                                                        pars: THREE.ShaderChunk.gpup_physics.const_pars,
-                                                        frag: THREE.ShaderChunk.gpup_physics.const_frag,
-                                                        replaces: [ {string: "NUM_CONST_PHYS_ATTR", value: this.forceCarriers[0].length} ]
-                                                    });
-
-            if( this.forceCarriers[1].length ) chunks.push ({
-                                                        pars: THREE.ShaderChunk.gpup_physics.point_pars,
-                                                        frag: THREE.ShaderChunk.gpup_physics.point_frag,
-                                                        replaces: [ {string: "NUM_POINT_PHYS_ATTR", value: this.forceCarriers[1].length} ]
-                                                    });
-
-            chunks.forEach( chunk => {
-
-                chunk.replaces && chunk.replaces.forEach( replace => {
-
-                    const re = new RegExp( replace.string, "g" );
-
-                    if( chunk.pars ) chunk.pars = chunk.pars.replace( re, replace.value );
-                    if( chunk.frag ) chunk.frag = chunk.frag.replace( re, replace.value );
-
-                });
-
-                if( chunk.pars ) shader_pars = shader_pars + chunk.pars;
-                if( chunk.frag ) shader_frag = shader_frag + chunk.frag;
-
-
-            });
-
-        };
-
-        return frag.replace( "<<<PHYSICS_PARS_CHUNK>>>", shader_pars ).replace( "<<<PHYSICS_FRAG_CHUNK>>>", shader_frag );
-
-    },
-
     calcOffset: function( position, velocity ){
+
+        const find3DPos = ( source, normal ) => {
+
+            let pos = new THREE.Vector3();
+
+            switch( this.params.SPAWN_EMDISTRIB ){
+
+                case "centre":
+
+                    pos.x = source.reduce( ( acc, vert ) => acc + vert.x, 0)/source.length;
+                    pos.y = source.reduce( ( acc, vert ) => acc + vert.y, 0)/source.length;
+                    pos.z = source.reduce( ( acc, vert ) => acc + vert.z, 0)/source.length;
+
+                    break;
+
+                case "random":
+
+                    let genPos;
+
+                    switch( this.params.SPAWN_EMITFROM ){
+
+                        case "face":
+
+                            genPos = () => new THREE.Vector3().subVectors( source[1], source[0] ).multiplyScalar( Math.random() ).add( new THREE.Vector3().subVectors( source[2], source[0] ).multiplyScalar( Math.random() ) ).add( source[0] );
+
+                            break;
+
+                        case "volume":
+
+                            genPos = () => {
+
+                                const tmp = new THREE.Vector3().subVectors( this.parent.geometry.boundingBox.max, this.parent.geometry.boundingBox.min )
+                                tmp.x = tmp.x * Math.random();
+                                tmp.y = tmp.y * Math.random();
+                                tmp.z = tmp.z * Math.random();
+
+                                return tmp.add( this.parent.geometry.boundingBox.min );
+
+                            };
+
+                            break;
+
+                    }
+
+                    pos = genPos();
+                    this.raycaster.set( pos, normal.clone().negate() );
+
+                    while( this.raycaster.intersectObject( this.parent ).length === 0 ) {
+
+                        pos = genPos();
+                        this.raycaster.set( pos, normal.clone().negate() );
+
+                    }
+
+                    break;
+
+            }
+
+            return pos
+
+        }
 
         //Position
         let sourceIndex;
@@ -299,7 +314,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             case "origin":
 
-
                 source = this.parent.position;
                 normal = this.parent.up;
                 position.add( source );
@@ -320,7 +334,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
                 index = sourceIndex( this.parent.geometry.faces )
 
                 normal = this.parent.geometry.faces[ index ].normal;
-                source = this.find3DPos( Object.values( this.parent.geometry.faces[ index ] ).slice( 0, 3 ).map( vert => this.parent.geometry.vertices[ vert ] ), normal.clone() );
+                source = find3DPos( Object.values( this.parent.geometry.faces[ index ] ).slice( 0, 3 ).map( vert => this.parent.geometry.vertices[ vert ] ), normal.clone() );
                 position.add( source );
 
                 break;
@@ -328,7 +342,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
             case "volume":
 
                 normal = this.parent.up;
-                source = this.find3DPos( this.parent.geometry.vertices, normal.clone() );
+                source = find3DPos( this.parent.geometry.vertices, normal.clone() );
                 position.add( source );
                 break;
 
@@ -346,11 +360,11 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     },
 
-    init: function( overwrite, history ){
+    init: function( overwrite ){
 
         if( this.points && !overwrite ){ console.warn( "System already initialised! Use .init( true ) to overwrite." ); return };
 
-        this.initComputeRenderer( true );
+        this.initComputeRenderer( true, this.trails.reduce( ( acc, trail ) => trail.length > acc ? trail.length : acc, 0 ) );
 
         this.ACTIVE_PARTICLE = 0;
         this.rateCounter = 0;
@@ -372,7 +386,52 @@ Object.assign( THREE.ParticleSystem.prototype, {
         history = history !== undefined ? history : 1;
 
         let physObjs = this.enablePhysics ? this.forceCarriers : { 0: [], 1: [], 2: [] };
-        const Velocity_Frag = this.buildVelocityFragment();
+
+        const getVelocityFragment = () => {
+
+            const frag = THREE.ShaderChunk.gpup_physics_velocity_frag;
+            let shader_pars = "", shader_frag = "";
+
+            let chunks = [];
+
+            if( this.enablePhysics ) {
+
+                chunks = chunks.concat( this.physicsShaderChunks );
+
+                if( this.forceCarriers[0].length ) chunks.push({
+                                                            pars: THREE.ShaderChunk.gpup_physics.const_pars,
+                                                            frag: THREE.ShaderChunk.gpup_physics.const_frag,
+                                                            replaces: [ {string: "NUM_CONST_PHYS_ATTR", value: this.forceCarriers[0].length} ]
+                                                        });
+
+                if( this.forceCarriers[1].length ) chunks.push ({
+                                                            pars: THREE.ShaderChunk.gpup_physics.point_pars,
+                                                            frag: THREE.ShaderChunk.gpup_physics.point_frag,
+                                                            replaces: [ {string: "NUM_POINT_PHYS_ATTR", value: this.forceCarriers[1].length} ]
+                                                        });
+
+                chunks.forEach( chunk => {
+
+                    chunk.replaces && chunk.replaces.forEach( replace => {
+
+                        const re = new RegExp( replace.string, "g" );
+
+                        if( chunk.pars ) chunk.pars = chunk.pars.replace( re, replace.value );
+                        if( chunk.frag ) chunk.frag = chunk.frag.replace( re, replace.value );
+
+                    });
+
+                    if( chunk.pars ) shader_pars = shader_pars + chunk.pars;
+                    if( chunk.frag ) shader_frag = shader_frag + chunk.frag;
+
+
+                });
+
+            };
+
+            return frag.replace( "<<<PHYSICS_PARS_CHUNK>>>", shader_pars ).replace( "<<<PHYSICS_FRAG_CHUNK>>>", shader_frag );
+
+        };
 
         let texSize = Math.pow( 2, Math.ceil( Math.log2( Math.sqrt( this._softParticleLimit ) ) ) );
 
@@ -389,7 +448,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             //Variable holders
             let offsetVar = gpuCompute.addVariable( "textureOffset", THREE.ShaderChunk.gpup_physics_offset_frag, dataOffset );
-            let velocityVar = gpuCompute.addVariable( "textureVelocity", Velocity_Frag, dataVelocity );
+            let velocityVar = gpuCompute.addVariable( "textureVelocity", getVelocityFragment(), dataVelocity );
 
             velocityVar.wrapS = THREE.RepeatWrapping;
             velocityVar.wrapT = THREE.RepeatWrapping;
@@ -453,71 +512,10 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
             this.offsetVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + THREE.ShaderChunk.gpup_physics_offset_frag;
             this.offsetVar.material.needsUpdate = true;
-            this.velocityVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + Velocity_Frag;
+            this.velocityVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + getVelocityFragment();
             this.velocityVar.material.needsUpdate = true;
 
         }
-
-    },
-
-    find3DPos: function( source, normal ){
-
-        let pos = new THREE.Vector3();
-
-        switch( this.params.SPAWN_EMDISTRIB ){
-
-            case "centre":
-
-                pos.x = source.reduce( ( acc, vert ) => acc + vert.x, 0)/source.length;
-                pos.y = source.reduce( ( acc, vert ) => acc + vert.y, 0)/source.length;
-                pos.z = source.reduce( ( acc, vert ) => acc + vert.z, 0)/source.length;
-
-                break;
-
-            case "random":
-
-                let genPos;
-
-                switch( this.params.SPAWN_EMITFROM ){
-
-                    case "face":
-
-                        genPos = () => new THREE.Vector3().subVectors( source[1], source[0] ).multiplyScalar( Math.random() ).add( new THREE.Vector3().subVectors( source[2], source[0] ).multiplyScalar( Math.random() ) ).add( source[0] );
-
-                        break;
-
-                    case "volume":
-
-                        genPos = () => {
-
-                            const tmp = new THREE.Vector3().subVectors( this.parent.geometry.boundingBox.max, this.parent.geometry.boundingBox.min )
-                            tmp.x = tmp.x * Math.random();
-                            tmp.y = tmp.y * Math.random();
-                            tmp.z = tmp.z * Math.random();
-
-                            return tmp.add( this.parent.geometry.boundingBox.min );
-
-                        };
-
-                        break;
-
-                }
-
-                pos = genPos();
-                this.raycaster.set( pos, normal.clone().negate() );
-
-                while( this.raycaster.intersectObject( this.parent ).length === 0 ) {
-
-                    pos = genPos();
-                    this.raycaster.set( pos, normal.clone().negate() );
-
-                }
-
-                break;
-
-        }
-
-        return pos
 
     },
 
@@ -784,7 +782,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.offsetVar.material.uniforms.particleInfo.value.image.data[ i * 3     ] = 1;
         this.offsetVar.material.uniforms.particleInfo.value.image.data[ i * 3 + 1 ] = this.params.MASS;
         this.offsetVar.material.uniforms.particleInfo.value.image.data[ i * 3 + 2 ] = this.params.CHARGE;
-
 
         let [ position, normal ] = this.calcOffset( this.params.INIT_POS.clone() );
 
@@ -1263,7 +1260,6 @@ THREE.ForceCarrier = function( options ){
 
     this.isForceCarrier = true;
     this.type = options.type !== undefined ? options.type : 1;
-    this.decay = 2;
 
     switch( this.type ){
 
@@ -1306,20 +1302,29 @@ Object.assign( THREE.ForceCarrier.prototype, {
 
             case 1: //Point
 
-                helperMesh = new THREE.Mesh( new THREE.SphereGeometry( this.radius, 6, 6 ), new THREE.MeshBasicMaterial( { wireframe : true } ) );
+                helperMesh = new THREE.Mesh( new THREE.SphereGeometry( 0.5, 6, 6 ), new THREE.MeshBasicMaterial( { wireframe : true } ) );
 
                 [ 1, -1 ].forEach( dir => {
 
-                    [ new THREE.Vector3( -1, 2, 0 ), new THREE.Vector3( 0, 2.2, 0 ), new THREE.Vector3( 1, 2, 0 ) ].forEach( arrow => {
+                    [ new THREE.Vector3( -0.5, 1, 0 ), new THREE.Vector3( 0, 1.1, 0 ), new THREE.Vector3( 0.5, 1, 0 ) ].forEach( arrow => {
 
                         const arrowOrigin = helperMesh.position.clone().add( arrow.multiplyScalar( dir ) );
-                        helperMesh.add( new THREE.ArrowHelper( arrow.negate().normalize(), arrowOrigin, 1, 0xffffff ) );
+                        if( this.strength > 0 ){
+
+                            helperMesh.add( new THREE.ArrowHelper( arrow.clone().normalize(), arrowOrigin.add( arrow.multiplyScalar( 0.5 ) ), 0.5, 0xffffff, 0.2, 0.2 ) );
+
+                        } else{
+
+                            helperMesh.add( new THREE.ArrowHelper( arrow.negate().normalize(), arrowOrigin, 0.5, 0xffffff, 0.2, 0.2 ) );
+
+                        }
 
                     });
 
                 })
 
                 helperMesh.position.copy( this.position );
+                this._helper = helperMesh;
                 this.add( helperMesh );
                 break;
 
