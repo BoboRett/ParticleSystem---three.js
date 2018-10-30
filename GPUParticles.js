@@ -56,7 +56,7 @@ THREE.ParticleSystem = function( options ){
 
     this.TIME = 0;
 
-    this.forceCarriers = { 0: [], 1: [], 2: [] };
+    this.forceCarriers = { "CustomForce": [], "ConstantForce": [], "PointForce": [] };
 
     this._rateCounter = 0;
     this._offset = 0;
@@ -112,6 +112,7 @@ THREE.ParticleSystem = function( options ){
 
     this.raycaster = new THREE.Raycaster();
     this.trails = [];
+    this._maxTrailLength = 1;
 
     this.DPR = window.devicePixelRatio;
     this.isParticleSystem = true;
@@ -216,7 +217,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         trailMat.vertexShader = pars + trailMat.vertexShader.replace( "<<<TEXTURE_PICKER>>>", texturePicker );
 
-        this.initComputeRenderer( true, length );
 
         const trail = new THREE.LineSegments( trailGeo, trailMat );
         trail.length = length;
@@ -224,6 +224,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         this.add( trail );
         this.trails.push( trail );
+        this.initComputeRenderer( false, length );
 
     },
 
@@ -364,7 +365,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         if( this.points && !overwrite ){ console.warn( "System already initialised! Use .init( true ) to overwrite." ); return };
 
-        this.initComputeRenderer( true, this.trails.reduce( ( acc, trail ) => trail.length > acc ? trail.length : acc, 0 ) );
+        this.initComputeRenderer( true, this._maxTrailLength );
 
         this.ACTIVE_PARTICLE = 0;
         this.rateCounter = 0;
@@ -383,32 +384,42 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     initComputeRenderer: function( rewrite, history ){
 
-        history = history !== undefined ? history : 1;
+        history = history !== undefined ? history : this._maxTrailLength;
 
-        let physObjs = this.enablePhysics ? this.forceCarriers : { 0: [], 1: [], 2: [] };
+        let physObjs = this.enablePhysics ? this.forceCarriers : { "CustomForce": [], "ConstantForce": [], "PointForce": [] };
 
         const getVelocityFragment = () => {
 
             const frag = THREE.ShaderChunk.gpup_physics_velocity_frag;
-            let shader_pars = "", shader_frag = "";
+            let shader_pars = "", shader_main = "";
 
             let chunks = [];
 
             if( this.enablePhysics ) {
 
-                chunks = chunks.concat( this.physicsShaderChunks );
+                //chunks = chunks.concat( this.physicsShaderChunks );
 
-                if( this.forceCarriers[0].length ) chunks.push({
+                if( this.forceCarriers["ConstantForce"].length ) chunks.push({
                                                             pars: THREE.ShaderChunk.gpup_physics.const_pars,
-                                                            frag: THREE.ShaderChunk.gpup_physics.const_frag,
-                                                            replaces: [ {string: "NUM_CONST_PHYS_ATTR", value: this.forceCarriers[0].length} ]
+                                                            main: THREE.ShaderChunk.gpup_physics.const_main,
+                                                            replaces: [ {string: "NUM_CONST_PHYS_ATTR", value: this.forceCarriers["ConstantForce"].length} ]
                                                         });
 
-                if( this.forceCarriers[1].length ) chunks.push ({
+                if( this.forceCarriers["PointForce"].length ) chunks.push ({
                                                             pars: THREE.ShaderChunk.gpup_physics.point_pars,
-                                                            frag: THREE.ShaderChunk.gpup_physics.point_frag,
-                                                            replaces: [ {string: "NUM_POINT_PHYS_ATTR", value: this.forceCarriers[1].length} ]
+                                                            main: THREE.ShaderChunk.gpup_physics.point_main,
+                                                            replaces: [ {string: "NUM_POINT_PHYS_ATTR", value: this.forceCarriers["PointForce"].length} ]
                                                         });
+
+
+                this.forceCarriers["CustomForce"].forEach( force => {
+
+                    chunks.push({
+                        pars: force.fragmentPars,
+                        main: force.fragmentMain,
+                    })
+
+                })
 
                 chunks.forEach( chunk => {
 
@@ -417,25 +428,27 @@ Object.assign( THREE.ParticleSystem.prototype, {
                         const re = new RegExp( replace.string, "g" );
 
                         if( chunk.pars ) chunk.pars = chunk.pars.replace( re, replace.value );
-                        if( chunk.frag ) chunk.frag = chunk.frag.replace( re, replace.value );
+                        if( chunk.main ) chunk.main = chunk.main.replace( re, replace.value );
 
                     });
 
                     if( chunk.pars ) shader_pars = shader_pars + chunk.pars;
-                    if( chunk.frag ) shader_frag = shader_frag + chunk.frag;
+                    if( chunk.main ) shader_main = shader_main + chunk.main;
 
 
                 });
 
             };
 
-            return frag.replace( "<<<PHYSICS_PARS_CHUNK>>>", shader_pars ).replace( "<<<PHYSICS_FRAG_CHUNK>>>", shader_frag );
+            return frag.replace( "<<<PHYSICS_PARS_CHUNK>>>", shader_pars ).replace( "<<<PHYSICS_MAIN_CHUNK>>>", shader_main );
 
         };
 
         let texSize = Math.pow( 2, Math.ceil( Math.log2( Math.sqrt( this._softParticleLimit ) ) ) );
 
-        if( ( this.gpuCompute ? texSize !== this.gpuCompute.texSize : true ) || rewrite ){
+        if( ( this.gpuCompute ? texSize !== this.gpuCompute.texSize : true ) || history > this._maxTrailLength || rewrite ){
+
+            this._maxTrailLength = history;
 
             let gpuCompute = new GPUComputationRenderer( texSize, texSize, renderer, history );
             gpuCompute.texSize = texSize;
@@ -485,19 +498,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
             offsetUniforms.particleInfo = infoUniform;
             velocityUniforms.particleInfo = infoUniform;
 
-            //Forcefields
-            velocityUniforms.forcefields_const = {
-                properties: { direction: {}, magnitude: {} },
-                value: physObjs[0]
-            };
-            velocityUniforms.forcefields_point = {
-                properties: { position: {}, strength: {}, decay: {} },
-                value: physObjs[1]
-            };
-
-            //External shader uniforms
-            Object.assign( velocityUniforms, this.physicsShaderChunks.reduce( ( acc, chunk ) => Object.assign( acc, chunk.uniforms ), {} ) )
-
             let error = gpuCompute.init();
             if ( error !== null ) {
                 console.error( error );
@@ -517,12 +517,33 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         }
 
+        //Forcefields
+        this.velocityUniforms.forcefields_const = {
+            properties: { acceleration: {} },
+            value: physObjs["ConstantForce"]
+        };
+        this.velocityUniforms.forcefields_point = {
+            properties: { position: {}, strength: {}, decay: {} },
+            value: physObjs["PointForce"]
+        };
+
+        //External shader uniforms
+        Object.assign( this.velocityUniforms, physObjs["CustomForce"].reduce( ( acc, chunk ) => Object.assign( acc, chunk.uniforms ), {} ) )
+
     },
 
     assignForceCarrier: function( value ){
 
-        if( value.isForceCarrier ) this.forceCarriers[value.type].push( value );
-        this.initComputeRenderer();
+        if( value.isForceCarrier ){
+
+            if( this.forceCarriers[value.type].indexOf( value ) ){
+
+                this.forceCarriers[value.type].push( value );
+                this.initComputeRenderer( false, this._maxTrailLength );
+
+            }
+
+        }
 
     },
 
@@ -768,7 +789,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         const varyAttribute = attr => attr * THREE.Math.randFloat( -1, 1 );
         const i = this.ACTIVE_PARTICLE;
-
         this._offset = this._offset === null ? i : this._offset;
         this._count++;
 
@@ -867,7 +887,8 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         if( !this.parent ){ console.warn( "No parent object!" ); return; };
 
-        const delta = clock.getDelta() * this.params.TIME_SCALE;
+        let delta = clock.getDelta() * this.params.TIME_SCALE;
+        delta = delta > 1 ? 1 : delta;
 
         this.TIME += delta;
         this._count = 0;
@@ -1254,28 +1275,18 @@ Object.defineProperties( THREE.ParticleSystem.prototype, {
 
 })
 
-THREE.ForceCarrier = function( options ){
+THREE.ForceCarrier = function( pars, main, uniforms, showHelper ){
 
     THREE.Object3D.apply( this, arguments );
 
+    this.type = "CustomForce";
     this.isForceCarrier = true;
-    this.type = options.type !== undefined ? options.type : 1;
 
-    switch( this.type ){
+    this.fragmentPars = pars;
+    this.fragmentMain = main;
+    this.uniforms = uniforms;
 
-        case 0:
-            this.direction = options.direction !== undefined ? options.direction.normalize() : new THREE.Vector3( 0, -1, 0 ).normalize();
-            this.magnitude = options.magnitude !== undefined ? options.magnitude : 9.81;
-            break;
-
-        case 1:
-            this.strength = options.strength !== undefined ? options.strength : 1;
-            this.decay = options.decay !== undefined ? options.decay : 1;
-            break;
-
-    }
-
-    options.showHelper && this.drawHelper();
+    showHelper && this.drawHelper();
 
 };
 
@@ -1286,65 +1297,91 @@ Object.assign( THREE.ForceCarrier.prototype, {
 
     drawHelper: function(){
 
-        let helperGeo;
-
-        switch( this.type ){
-
-            case 0: //Constant
-
-                helperMesh = new THREE.Mesh( new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial( { wireframe : true } ) );
-                helperMesh.up = new THREE.Vector3( 0, 0, 1 );
-                helperMesh.add( new THREE.ArrowHelper( helperMesh.up, helperMesh.position, 1, 0xffffff ) );
-                helperMesh.position.copy( this.position );
-                helperMesh.lookAt( this.direction );
-                this.add( helperMesh );
-                break;
-
-            case 1: //Point
-
-                helperMesh = new THREE.Mesh( new THREE.SphereGeometry( 0.5, 6, 6 ), new THREE.MeshBasicMaterial( { wireframe : true } ) );
-
-                [ 1, -1 ].forEach( dir => {
-
-                    [ new THREE.Vector3( -0.5, 1, 0 ), new THREE.Vector3( 0, 1.1, 0 ), new THREE.Vector3( 0.5, 1, 0 ) ].forEach( arrow => {
-
-                        const arrowOrigin = helperMesh.position.clone().add( arrow.multiplyScalar( dir ) );
-                        if( this.strength > 0 ){
-
-                            helperMesh.add( new THREE.ArrowHelper( arrow.clone().normalize(), arrowOrigin.add( arrow.multiplyScalar( 0.5 ) ), 0.5, 0xffffff, 0.2, 0.2 ) );
-
-                        } else{
-
-                            helperMesh.add( new THREE.ArrowHelper( arrow.negate().normalize(), arrowOrigin, 0.5, 0xffffff, 0.2, 0.2 ) );
-
-                        }
-
-                    });
-
-                })
-
-                helperMesh.position.copy( this.position );
-                this._helper = helperMesh;
-                this.add( helperMesh );
-                break;
-
-        }
-
     },
 
 });
 
-Object.defineProperties( THREE.ForceCarrier.prototype, {
+THREE.ConstantForce = function( accel, showHelper ){
 
-    "type": {
+    THREE.Object3D.apply( this, arguments );
 
-        get: function(){ return this._type },
+    this.type = "ConstantForce";
+    this.isForceCarrier = true;
+    this.acceleration = accel !== undefined ? accel : new THREE.Vector3( 0, -9.81, 0 );
+    showHelper && this.drawHelper();
 
-        set: function( value ){ this._type = +value == +value? value : { "constant": 0, "point": 1 }[value] }
+}
+
+THREE.ConstantForce.prototype = Object.create( THREE.Object3D.prototype );
+THREE.ConstantForce.prototype.constructor = THREE.ConstantForce;
+
+Object.assign( THREE.ConstantForce.prototype, {
+
+    drawHelper: function(){
+
+        if( this.children.length > 0 ) this.remove( this.children[0] );
+
+        const helperMesh = new THREE.Mesh( new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial( { wireframe : true } ) );
+        helperMesh.up = new THREE.Vector3( 0, 0, 1 );
+        helperMesh.add( new THREE.ArrowHelper( helperMesh.up, helperMesh.position, 1, 0xffffff ) );
+        helperMesh.position.copy( this.position );
+        helperMesh.lookAt( this.acceleration.clone().normalize() );
+        this.add( helperMesh );
 
     },
 
-});
+
+})
+
+THREE.PointForce = function( strength, decay, showHelper ){
+
+    THREE.Object3D.apply( this, arguments );
+
+    this.type = "PointForce";
+    this.isForceCarrier = true;
+    this.strength = strength !== undefined ? strength : 1;
+    this.decay = decay !== undefined? decay : 2;
+    showHelper && this.drawHelper();
+
+}
+
+THREE.PointForce.prototype = Object.create( THREE.Object3D.prototype );
+THREE.PointForce.prototype.constructor = THREE.PointForce;
+
+Object.assign( THREE.PointForce.prototype, {
+
+    drawHelper: function(){
+
+        const helperMesh = new THREE.Mesh( new THREE.SphereGeometry( 0.5, 6, 6 ), new THREE.MeshBasicMaterial( { wireframe : true } ) );
+
+        [ 1, -1 ].forEach( dir => {
+
+            [ new THREE.Vector3( -0.5, 1, 0 ), new THREE.Vector3( 0, 1.1, 0 ), new THREE.Vector3( 0.5, 1, 0 ) ].forEach( arrow => {
+
+                const arrowOrigin = helperMesh.position.clone().add( arrow.multiplyScalar( dir ) );
+                if( this.strength > 0 ){
+
+                    helperMesh.add( new THREE.ArrowHelper( arrow.clone().normalize(), arrowOrigin.add( arrow.multiplyScalar( 0.5 ) ), 0.5, 0xffffff, 0.2, 0.2 ) );
+
+                } else{
+
+                    helperMesh.add( new THREE.ArrowHelper( arrow.negate().normalize(), arrowOrigin, 0.5, 0xffffff, 0.2, 0.2 ) );
+
+                }
+
+            });
+
+        })
+
+        helperMesh.position.copy( this.position );
+        this.add( helperMesh );
+
+    },
+
+
+})
+
+
 
 Object.assign( THREE.ShaderChunk, {
 
@@ -1379,20 +1416,20 @@ Object.assign( THREE.ShaderChunk, {
         }
     `,
 
-    gpup_physics_velocity_frag: `\nuniform float delta;\nuniform sampler2D particleInfo; //[isUpdated,mass,charge]\nuniform sampler2D newPos;\nuniform sampler2D newVel;\n\n<<<PHYSICS_PARS_CHUNK>>>\n\nvoid main() {\n\n\tvec2 uv = gl_FragCoord.xy / resolution.xy;\n\tvec4 uVel = texture2D( textureVelocity, uv );\n\tvec4 position = texture2D( textureOffset, uv );\n\tvec3 resForce = vec3( 0, 0, 0 );\n\tvec3 r_forcefield;\n\n\tvec3 particleInfo = texture2D( particleInfo, uv ).xyz;\n\tfloat isUpdated = particleInfo.x;\n\tfloat mass = particleInfo.y;\n\tfloat charge = particleInfo.z;\n\n\tif( isUpdated > 0.0 ){\n\t\tuVel = texture2D( newVel, uv );\n\t\tposition = texture2D( newPos, uv );\n\t}\n\n\t<<<PHYSICS_FRAG_CHUNK>>>\n\n\tvec3 vVel = uVel.xyz + ( resForce / mass ) * delta;\n\tgl_FragColor = vec4( vVel, 1 );\n\n}\n`,
+    gpup_physics_velocity_frag: `\nuniform float delta;\nuniform sampler2D particleInfo; //[isUpdated,mass,charge]\nuniform sampler2D newPos;\nuniform sampler2D newVel;\n\n<<<PHYSICS_PARS_CHUNK>>>\n\nvoid main() {\n\n\tvec2 uv = gl_FragCoord.xy / resolution.xy;\n\tvec4 uVel = texture2D( textureVelocity, uv );\n\tvec4 position = texture2D( textureOffset, uv );\n\tvec3 resForce = vec3( 0, 0, 0 );\n\tvec3 r_forcefield;\n\n\tvec3 particleInfo = texture2D( particleInfo, uv ).xyz;\n\tfloat isUpdated = particleInfo.x;\n\tfloat mass = particleInfo.y;\n\tfloat charge = particleInfo.z;\n\n\tif( isUpdated > 0.0 ){\n\t\tuVel = texture2D( newVel, uv );\n\t\tposition = texture2D( newPos, uv );\n\t}\n\n\t<<<PHYSICS_MAIN_CHUNK>>>\n\n\tvec3 vVel = uVel.xyz + ( resForce / mass ) * delta;\n\tgl_FragColor = vec4( vVel, 1 );\n\n}\n`,
 
     gpup_physics:{
         point_pars: `\nstruct PointForceField {\n\tvec3 position;\n\tfloat strength;\n\tfloat decay;\n};\nuniform PointForceField forcefields_point[ NUM_POINT_PHYS_ATTR ];\n`,
 
-        point_frag: `\nPointForceField forcefield_point;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_POINT_PHYS_ATTR; i ++ ) {\n\t\tforcefield_point = forcefields_point[ i ];\n\t\tr_forcefield = position.xyz - forcefield_point.position;\n\t\tresForce += normalize( r_forcefield ) * forcefield_point.strength * mass / pow( length( r_forcefield ), forcefield_point.decay );\n}\n`,
+        point_main: `\nPointForceField forcefield_point;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_POINT_PHYS_ATTR; i ++ ) {\n\t\tforcefield_point = forcefields_point[ i ];\n\t\tr_forcefield = position.xyz - forcefield_point.position;\n\t\tresForce += normalize( r_forcefield ) * forcefield_point.strength * mass / pow( length( r_forcefield ), forcefield_point.decay );\n}\n`,
 
-        const_pars: `\nstruct ConstantForceField {\n\tvec3 direction;\n\tfloat magnitude;\n};\nuniform ConstantForceField forcefields_const[ NUM_CONST_PHYS_ATTR ];\n`,
+        const_pars: `\nstruct ConstantForceField {\n\tvec3 acceleration;};\nuniform ConstantForceField forcefields_const[ NUM_CONST_PHYS_ATTR ];\n`,
 
-        const_frag: `\nConstantForceField forcefield_const;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_CONST_PHYS_ATTR; i ++ ) {\n\t\tforcefield_const = forcefields_const[ i ];\n\t\tresForce += forcefield_const.direction * forcefield_const.magnitude / mass;\n\t}\n`,
+        const_main: `\nConstantForceField forcefield_const;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_CONST_PHYS_ATTR; i ++ ) {\n\t\tforcefield_const = forcefields_const[ i ];\n\t\tresForce += forcefield_const.acceleration / mass;\n\t}\n`,
 
         boid_pars: `\nuniform float view_radius;\nuniform float separation_threshold; //Radius it wants clear of others\nuniform float separation_strength; //Repulsion from others\nuniform float flock_threshold; //Radius it considers boids to be part of its 'flock'\nuniform float cohesion_strength; //Attraction to centre of flock\nuniform float alignment_strength; //Strength of speed matching between flock members\n`,
 
-        boid_frag: `\nvec3 boidsPerceivedCOM = vec3( 0, 0, 0 );\nvec3 boidsPerceivedVelocity = vec3( 0, 0, 0 );\nvec3 boidsSeparationVelocity = vec3( 0, 0, 0 );\nfloat numBoids = 0.0;\nvec3 maxBoidVel = vec3( 1.0, 1.0, 1.0 );\nfor( float y = 0.0; y < resolution.y; y++ ){\n\n\tfor( float x = 0.0; x < resolution.x; x++ ){\n\n\t\tvec2 boidRef = vec2( x + 0.5, y + 0.5 ) / resolution.xy; //Get other boid reference\n\n\t\tif( length( boidRef - uv ) < 0.001 ) continue; //If self, ignore\n\n\t\tvec3 boidPos = texture2D( textureOffset, boidRef ).xyz;\n\t\tvec3 boidVel = texture2D( textureVelocity, boidRef ).xyz;\n\n\t\tif( boidPos == vec3( 0, 0, 0 ) && boidVel == vec3( 0, 0, 0 ) ) continue; //If other boid is immobile at origin ( i.e. undrawn ), ignore\n\n\t\tvec3 boidDisplacement = boidPos - position.xyz;\n\t\tfloat boidDistance = length( boidDisplacement );\n\n\t\tfloat thresholdDistance = boidDistance / view_radius;\n\n\t\tif( thresholdDistance > 1.0 ) continue; //If out of view, ignore\n\n\t\tif( thresholdDistance < separation_threshold ) boidsSeparationVelocity -= normalize( boidDisplacement ) / boidDistance; //Neighbour too close\n\n\t\tif( thresholdDistance < flock_threshold ) { //Neighbour in flock\n\t\t\tnumBoids++;\n\t\t\tboidsPerceivedCOM += boidPos;\n\t\t\tboidsPerceivedVelocity += boidVel;\n\t\t}\n\n\t}\n\n}\n\n//Cohesion + Separation + Alignment\nresForce += mass * clamp( ( boidsPerceivedCOM / numBoids - position.xyz ) * cohesion_strength + boidsSeparationVelocity * separation_strength + ( boidsPerceivedVelocity / numBoids - uVel.xyz ) * alignment_strength, -maxBoidVel, maxBoidVel );\n`
+        boid_main: `\nvec3 boidsPerceivedCOM = vec3( 0, 0, 0 );\nvec3 boidsPerceivedVelocity = vec3( 0, 0, 0 );\nvec3 boidsSeparationVelocity = vec3( 0, 0, 0 );\nfloat numBoids = 0.0;\nvec3 maxBoidVel = vec3( 1.0, 1.0, 1.0 );\nfor( float y = 0.0; y < resolution.y; y++ ){\n\n\tfor( float x = 0.0; x < resolution.x; x++ ){\n\n\t\tvec2 boidRef = vec2( x + 0.5, y + 0.5 ) / resolution.xy; //Get other boid reference\n\n\t\tif( length( boidRef - uv ) < 0.001 ) continue; //If self, ignore\n\n\t\tvec3 boidPos = texture2D( textureOffset, boidRef ).xyz;\n\t\tvec3 boidVel = texture2D( textureVelocity, boidRef ).xyz;\n\n\t\tif( boidPos == vec3( 0, 0, 0 ) && boidVel == vec3( 0, 0, 0 ) ) continue; //If other boid is immobile at origin ( i.e. undrawn ), ignore\n\n\t\tvec3 boidDisplacement = boidPos - position.xyz;\n\t\tfloat boidDistance = length( boidDisplacement );\n\n\t\tfloat thresholdDistance = boidDistance / view_radius;\n\n\t\tif( thresholdDistance > 1.0 ) continue; //If out of view, ignore\n\n\t\tif( thresholdDistance < separation_threshold ) boidsSeparationVelocity -= normalize( boidDisplacement ) / boidDistance; //Neighbour too close\n\n\t\tif( thresholdDistance < flock_threshold ) { //Neighbour in flock\n\t\t\tnumBoids++;\n\t\t\tboidsPerceivedCOM += boidPos;\n\t\t\tboidsPerceivedVelocity += boidVel;\n\t\t}\n\n\t}\n\n}\n\n//Cohesion + Separation + Alignment\nresForce += mass * clamp( ( boidsPerceivedCOM / numBoids - position.xyz ) * cohesion_strength + boidsSeparationVelocity * separation_strength + ( boidsPerceivedVelocity / numBoids - uVel.xyz ) * alignment_strength, -maxBoidVel, maxBoidVel );\n`
     },
 
 });

@@ -77,10 +77,10 @@
 
 		particleSystem.buildOptions();
 
-		particleSystem.physicsShaderChunks.push({
-			pars: THREE.ShaderChunk.gpup_physics.boid_pars,
-			frag: THREE.ShaderChunk.gpup_physics.boid_frag,
-			uniforms: {
+		boidsForce = new THREE.ForceCarrier(
+			THREE.ShaderChunk.gpup_physics.boid_pars,
+			THREE.ShaderChunk.gpup_physics.boid_main,
+			{
 
 				'view_radius': {
 					value: 5.0
@@ -102,16 +102,105 @@
 				}
 
 			}
-		});
+		);
 
-		particleSystem.initComputeRenderer();
-		particleSystem.addTrails( 16 );
+		particleSystem.assignForceCarrier( boidsForce );
 
-
-		force = new THREE.ForceCarrier( { strength: -1, type: 1, showHelper: true } );
+		force = new THREE.ConstantForce( new THREE.Vector3( 0, -9.81, 0 ), true );
 		scene.add( force );
 		force.translateX( 2 );
 		particleSystem.assignForceCarrier( force );
+
+
+		colliderPlane = new THREE.Mesh( new THREE.CircleGeometry( 4, 32 ) );
+		colliderPlane.translateY( -2 );
+		colliderPlane.rotateOnWorldAxis( new THREE.Vector3( 0, 1, 0 ), Math.PI/4 );
+		colliderPlane.rotateOnWorldAxis( new THREE.Vector3( 1, 0, 0 ), -Math.PI/2 );
+
+		colliderPlane.updateMatrixWorld();
+
+		//  / x \\    / s_x + u_x*t \\
+		// |  y  | =|  s_y + u_y*t  | : Line parameterisation
+		//  \\ z /    \\ s_y + u_z*t /
+		//------------------------------------------------
+		// n_x( x - a_x ) + n_y( y - a_y ) + n_z( z - a_z ) = 0 : Equation of plane. n - normal, a - point on plane (any vertex)
+		//------------------------------------------------
+		// Substitute line for x, y, z:
+		//
+		// n_x( s_x + u_x*t - a_x ) + n_y( s_y + u_y*t - a_y ) + n_z( s_y + u_z*t - a_z ) = 0
+		//------------------------------------------------
+		// Solve for t:
+		//
+		// [[ a_x*b_x + a_y*b_y + a_z*b_z = dot( a, b ) ]]
+		//
+		// dot( n, s ) + t * dot( n, u_x ) - dot( n, a_x ) +  = 0
+		//
+		// therefore: t = ( dot( n, a_x ) - dot( n, s ) ) / dot(n, u_x )
+		//
+		// Get point of collision by subbing t back into line parameters
+
+		colliderForce = new THREE.ForceCarrier(
+			`\nstruct sCollisionFace {\n\tvec3 centre;\n\tvec3 normal;\n\tfloat radius;\nfloat elasticity;\nfloat friction;\n};\nuniform sCollisionFace collisionFace;`,
+			`
+			float collision_t = ( dot( collisionFace.normal, collisionFace.centre ) - dot( collisionFace.normal, position.xyz ) ) / dot( collisionFace.normal, uVel.xyz );
+
+			if( collision_t > 0.0 && collision_t < 3.0*delta ){
+
+				vec3 collisionPoint = position.xyz + uVel.xyz * collision_t;
+
+				if( length( collisionPoint - collisionFace.centre ) < collisionFace.radius ){
+
+					// Apply elastic collision
+					float collisionAngle = asin( dot( collisionFace.normal, uVel.xyz ) / ( length( collisionFace.normal ) * length( uVel.xyz ) ) );
+
+					mat3 reflectVel; // [ elastic velocity - perpendicular, friction velocity - tangential ]
+
+					// Elastic
+					vec3 perpendicularVel = collisionFace.normal * length( uVel.xyz * sin( collisionAngle ) );
+					reflectVel[0] = perpendicularVel * ( 1.0 + collisionFace.elasticity );
+
+					// Friction - Use velocity remaining after a perfectly inelastic collision (just gives a cleaner result rather than using cos component of uVel ((for some reason; really don't like this method)))
+					vec3 tangentVel = uVel.xyz + perpendicularVel;
+					reflectVel[1] = -1.0 * tangentVel * collisionFace.friction;
+
+					//Fix perpendicular velocity when penetrating to keep particle just above surface;
+					if( collision_t < 1.5*delta ){
+
+						uVel.xyz = tangentVel + reflectVel[1] + 0.1*normalize( perpendicularVel );
+						resForce = vec3( 0, 0, 0 );
+
+					} else{
+
+						resForce += mass * ( reflectVel[0] + reflectVel[1] ) / delta;
+
+					}
+
+				}
+			}
+
+			`,
+			{
+				collisionFace: {
+					properties: { centre: null, normal: null, radius: null },
+					value: {
+						centre: new THREE.Vector3().copy( colliderPlane.geometry.vertices.reduce( ( acc, el ) => acc.add( el ), new THREE.Vector3() ) ).divideScalar( colliderPlane.geometry.vertices.length ).add( colliderPlane.position ),
+						normal: colliderPlane.geometry.faces[0].normal.clone().applyQuaternion( colliderPlane.quaternion ).normalize(),
+						radius: colliderPlane.geometry.parameters.radius !== undefined ? colliderPlane.geometry.parameters.radius : 1,
+						elasticity: 0.1,
+						friction: 0.2,
+					}
+				}
+			}
+		)
+
+
+
+		colliderPlane.add( colliderForce );
+		scene.add( colliderPlane );
+		particleSystem.assignForceCarrier( colliderForce );
+
+
+		particleSystem.addTrails( 16 );
 
         controls = new THREE.TrackballControls( camera, renderer.domElement );
         controls.rotateSpeed = 5.0;
