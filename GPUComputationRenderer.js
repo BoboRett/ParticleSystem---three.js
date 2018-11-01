@@ -1,5 +1,5 @@
 /**
- * @author yomboprime https://github.com/yomboprime
+ * @author yomboprime https://github.com/yomboprime (fiddled with by BoboRett)
  *
  * GPUComputationRenderer, based on SimulationRenderer by zz85
  *
@@ -100,30 +100,30 @@
 function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 	this.variables = [];
-	var history = history !== undefined ? history : 1;
+	history = history !== undefined ? history : 1;
 
 	this.currentTextureIndex = 0;
 
-	var scene = new THREE.Scene();
+	const scene = new THREE.Scene();
 
-	var camera = new THREE.Camera();
+	const camera = new THREE.Camera();
 	camera.position.z = 1;
 
-	var passThruUniforms = {
+	const passThruUniforms = {
 		texture: { value: null }
 	};
 
-	var passThruShader = createShaderMaterial( getPassThroughFragmentShader(), passThruUniforms );
+	const passThruShader = createShaderMaterial( getPassThroughFragmentShader(), passThruUniforms );
 
-	var mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 2, 2 ), passThruShader );
+	const mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 2, 2 ), passThruShader );
 	scene.add( mesh );
 
 
 	this.addVariable = function( variableName, computeFragmentShader, initialValueTexture ) {
 
-		var material = this.createShaderMaterial( computeFragmentShader );
+		const material = this.createShaderMaterial( computeFragmentShader );
 
-		var variable = {
+		const variable = {
 			name: variableName,
 			initialValueTexture: initialValueTexture,
 			material: material,
@@ -161,9 +161,9 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 		}
 
-		for ( var i = 0; i < this.variables.length; i++ ) {
+		for ( let i = 0; i < this.variables.length; i++ ) {
 
-			var variable = this.variables[ i ];
+			const variable = this.variables[ i ];
 
 			// Creates rendertargets and initialize them with input texture
 			for( let i = 0; i <= history; i++ ){
@@ -172,19 +172,19 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 			}
 
 			// Adds dependencies uniforms to the ShaderMaterial
-			var material = variable.material;
-			var uniforms = material.uniforms;
+			const material = variable.material;
+			const uniforms = material.uniforms;
 			if ( variable.dependencies !== null ) {
 
-				for ( var d = 0; d < variable.dependencies.length; d++ ) {
+				for ( let d = 0; d < variable.dependencies.length; d++ ) {
 
-					var depVar = variable.dependencies[ d ];
+					const depVar = variable.dependencies[ d ];
 
 					if ( depVar.name !== variable.name ) {
 
 						// Checks if variable exists
-						var found = false;
-						for ( var j = 0; j < this.variables.length; j++ ) {
+						let found = false;
+						for ( let j = 0; j < this.variables.length; j++ ) {
 
 							if ( depVar.name === this.variables[ j ].name ) {
 								found = true;
@@ -214,20 +214,20 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 	this.compute = function() {
 
-		var currentTextureIndex = this.currentTextureIndex;
-		var nextTextureIndex = currentTextureIndex === history ? 0 : currentTextureIndex + 1;
+		const currentTextureIndex = this.currentTextureIndex;
+		const nextTextureIndex = currentTextureIndex === history ? 0 : currentTextureIndex + 1;
 
-		for ( var i = 0, il = this.variables.length; i < il; i++ ) {
+		for ( let i = 0, il = this.variables.length; i < il; i++ ) {
 
-			var variable = this.variables[ i ];
+			const variable = this.variables[ i ];
 
 			// Sets texture dependencies uniforms
 			if ( variable.dependencies !== null ) {
 
-				var uniforms = variable.material.uniforms;
-				for ( var d = 0, dl = variable.dependencies.length; d < dl; d++ ) {
+				const uniforms = variable.material.uniforms;
+				for ( let d = 0, dl = variable.dependencies.length; d < dl; d++ ) {
 
-					var depVar = variable.dependencies[ d ];
+					const depVar = variable.dependencies[ d ];
 
 					uniforms[ depVar.name ].value = depVar.renderTargets[ currentTextureIndex ].texture;
 
@@ -269,7 +269,7 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 		uniforms = uniforms || {};
 
-		var material = new THREE.ShaderMaterial( {
+		const material = new THREE.ShaderMaterial( {
 			uniforms: uniforms,
 			vertexShader: getPassThroughVertexShader(),
 			fragmentShader: computeFragmentShader
@@ -292,7 +292,7 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 		minFilter = minFilter || THREE.NearestFilter;
 		magFilter = magFilter || THREE.NearestFilter;
 
-		var renderTarget = new THREE.WebGLRenderTarget( sizeXTexture, sizeYTexture, {
+		const renderTarget = new THREE.WebGLRenderTarget( sizeXTexture, sizeYTexture, {
 			wrapS: wrapS,
 			wrapT: wrapT,
 			minFilter: minFilter,
@@ -309,8 +309,8 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 
 	this.createTexture = function() {
 
-		var a = new Float32Array( sizeX * sizeY * 4 );
-		var texture = new THREE.DataTexture( a, sizeX, sizeY, THREE.RGBAFormat, THREE.FloatType );
+		const a = new Float32Array( sizeX * sizeY * 4 );
+		const texture = new THREE.DataTexture( a, sizeX, sizeY, THREE.RGBAFormat, THREE.FloatType );
 		texture.needsUpdate = true;
 
 		return texture;

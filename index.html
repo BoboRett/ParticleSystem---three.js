@@ -142,6 +142,11 @@
 		colliderForce = new THREE.ForceCarrier(
 			`\nstruct sCollisionFace {\n\tvec3 centre;\n\tvec3 normal;\n\tfloat radius;\nfloat elasticity;\nfloat friction;\n};\nuniform sCollisionFace collisionFace;`,
 			`
+			// Apply other force contributions first to get an accurate idea of where the particle is going
+			uVel.xyz = uVel.xyz + ( resForce / mass ) * delta;
+			resForce = vec3( 0, 0, 0 );
+
+			// Get t
 			float collision_t = ( dot( collisionFace.normal, collisionFace.centre ) - dot( collisionFace.normal, position.xyz ) ) / dot( collisionFace.normal, uVel.xyz );
 
 			if( collision_t > 0.0 && collision_t < 3.0*delta ){

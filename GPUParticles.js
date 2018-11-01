@@ -1,3 +1,11 @@
+// My wishlist:
+//
+// Different way of calculating trails. Current method has hard limitations due to only being able to have 16 texture uniforms in a shader. WebGL2 transform feedback? Split trail into individual segment objects?
+//
+//
+//
+
+
 THREE.ParticleSystem = function( options ){
 
     THREE.Object3D.apply( this, arguments );
@@ -13,7 +21,7 @@ THREE.ParticleSystem = function( options ){
         //Emitter
         MAX_PARTICLES: options.maxParticles !== undefined ? options.maxParticles : 10000,
         SPAWN_RATE: options.spawnRate !== undefined ? options.spawnRate : 100,
-        ANIMATE_SPAWN: false, //Less memory efficient, stops rebuilding on spawn value change
+        ANIMATE_SPAWN: false, //Less memory efficient, stops rebuilding on spawn value change, will kill some PCs if using Physics
 
         SPAWN_EMITFROM: "face", //origin, vert, face, volume(WIP)
         SPAWN_ELDISTRIB: "random", //index, random,
@@ -51,14 +59,10 @@ THREE.ParticleSystem = function( options ){
 
     }
 
-    this.ACTIVE_PARTICLE = 0;
     this.PARTICLE_LIMIT_REACHED = false;
-
-    this.TIME = 0;
 
     this.forceCarriers = { "CustomForce": [], "ConstantForce": [], "PointForce": [] };
 
-    this._rateCounter = 0;
     this._offset = 0;
     this._count = 0;
 
@@ -135,16 +139,13 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         }
 
-        const refArrayBuilder = ( arr, clusterSize ) => {
+        const referenceArrayBuilder = ( arr, clusterSize ) => {
 
             for( let i = 0; i < arr.length / clusterSize; i++ ){
 
                 for( let j = 0; j < clusterSize; j++ ){
 
-                    arr[ ( i * clusterSize + j ) * 4     ] = j%2;
-                    arr[ ( i * clusterSize + j ) * 4 + 1 ] = ( i % this.gpuCompute.texSize ) / this.gpuCompute.texSize;
-                    arr[ ( i * clusterSize + j ) * 4 + 2 ] = ~~( i / this.gpuCompute.texSize ) / this.gpuCompute.texSize;
-                    arr[ ( i * clusterSize + j ) * 4 + 3 ] = ~~( ( j + 1 ) / 2 );
+                    arr[ ( i * clusterSize + j ) ] = j%2;
 
                 }
 
@@ -154,18 +155,39 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         };
 
+        const positionArraybuilder = ( arr, clusterSize ) => {
+
+            for( let i = 0; i < arr.length / clusterSize; i++ ){
+
+                for( let j = 0; j < clusterSize; j++ ){
+
+                    arr[ ( i * clusterSize + j ) * 3     ] = ( i % this.gpuCompute.texSize ) / this.gpuCompute.texSize;
+                    arr[ ( i * clusterSize + j ) * 3 + 1 ] = ~~( i / this.gpuCompute.texSize ) / this.gpuCompute.texSize;
+                    arr[ ( i * clusterSize + j ) * 3 + 2 ] = ~~( ( j + 1 ) / 2 );
+
+                }
+
+            }
+
+            return arr
+
+        }
+
+        const clusterSize = ( length - 1 ) * 2;
+
         const trailGeo = new THREE.BufferGeometry();
 
-        trailGeo.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( ( length - 1 ) * 2 * this._softParticleLimit * 3 ), 3 ).setDynamic( true ) );
-        trailGeo.addAttribute( 'reference', new THREE.BufferAttribute( new Float32Array( ( length - 1 ) * 2 * this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
-        refArrayBuilder( trailGeo.attributes.reference.array, ( length - 1 ) * 2 );
-        trailGeo.addAttribute( 'colour', new THREE.BufferAttribute( new Float32Array( ( length - 1 ) * 2 * this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
+        trailGeo.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit * 3 ), 3 ) );
+        positionArraybuilder( trailGeo.attributes.position.array, clusterSize );
+        trailGeo.addAttribute( 'reference', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit ), 1 ) );
+        referenceArrayBuilder( trailGeo.attributes.reference.array, clusterSize );
+        trailGeo.addAttribute( 'colour', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
 
         const trailMat = new THREE.ShaderMaterial( { transparent: true } );
 
         trailMat.vertexShader = `
 
-            attribute vec4 reference;
+            attribute float reference;
             attribute vec4 colour;
             varying float vtrailIndex;
             varying vec4 vColour;
@@ -177,7 +199,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
                 vColour = colour;
 
-                float trailIndex = reference.w;
+                float trailIndex = position.z;
                 vtrailIndex = trailIndex;
 
                 <<<TEXTURE_PICKER>>>
@@ -195,7 +217,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
         varying vec4 vColour;
 
         void main(){
-
             float alpha = 1.0 / ( vtrailIndex + 1.0 );
             gl_FragColor = vec4( vColour.xyz, vColour.w * alpha );
         }
@@ -210,8 +231,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
             trailMat.uniforms["textureOffset" + i] = { value: this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture };
             pars = "uniform sampler2D textureOffset" + i + ";\n" + pars;
 
-            texturePicker = "if( trailIndex == " + i + ".0 ) {\n\ttrailPosition = texture2D( textureOffset" + i + ", reference.yz );\n\tif( reference.x == 1.0 ) {\n\t\taltPosition = texture2D( textureOffset" + (( i - 1 + length )%(length)) + ", reference.yz );\n\t} else {\n\t\taltPosition = trailPosition;\n\t}\n}\n" + texturePicker;
-
+            texturePicker = "if( trailIndex == " + i + ".0 ) {\n\ttrailPosition = texture2D( textureOffset" + i + ", position.xy );\n\tif( reference == 1.0 ) {\n\t\taltPosition = texture2D( textureOffset" + (( i - 1 + length )%(length)) + ", position.xy );\n\t} else {\n\t\taltPosition = trailPosition;\n\t}\n}\n" + texturePicker;
 
         }
 
@@ -220,11 +240,13 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         const trail = new THREE.LineSegments( trailGeo, trailMat );
         trail.length = length;
-        trail.clusterSize = ( length - 1 ) * 2;
+        trail.clusterSize = clusterSize;
 
         this.add( trail );
         this.trails.push( trail );
         this.initComputeRenderer( false, length );
+
+        return trail
 
     },
 
@@ -291,7 +313,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         }
 
-        //Position
         let sourceIndex;
         let source;
         let index;
@@ -380,6 +401,16 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         this.add( this.points );
 
+
+        this.trails = this.trails.reduce( ( acc, trail, i, arr ) => {
+
+            this.remove( trail );
+            acc.push( this.addTrails( trail.length ) );
+
+            return acc
+
+        }, [])
+
     },
 
     initComputeRenderer: function( rewrite, history ){
@@ -390,7 +421,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         const getVelocityFragment = () => {
 
-            const frag = THREE.ShaderChunk.gpup_physics_velocity_frag;
+            const frag = THREE.ShaderChunk.gpup_velocity_frag;
             let shader_pars = "", shader_main = "";
 
             let chunks = [];
@@ -460,7 +491,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
             dataVelocity = this.gpuCompute ? this.gpuCompute.getCurrentRenderTarget( this.velocityVar ).texture : gpuCompute.createTexture();
 
             //Variable holders
-            let offsetVar = gpuCompute.addVariable( "textureOffset", THREE.ShaderChunk.gpup_physics_offset_frag, dataOffset );
+            let offsetVar = gpuCompute.addVariable( "textureOffset", THREE.ShaderChunk.gpup_offset_frag, dataOffset );
             let velocityVar = gpuCompute.addVariable( "textureVelocity", getVelocityFragment(), dataVelocity );
 
             velocityVar.wrapS = THREE.RepeatWrapping;
@@ -510,7 +541,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         } else{
 
-            this.offsetVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + THREE.ShaderChunk.gpup_physics_offset_frag;
+            this.offsetVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + THREE.ShaderChunk.gpup_offset_frag;
             this.offsetVar.material.needsUpdate = true;
             this.velocityVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + getVelocityFragment();
             this.velocityVar.material.needsUpdate = true;
@@ -593,7 +624,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         let particleGeo;
         let attrBuilder;
 
-        const refArrayBuilder = arr => {
+        const referenceArrayBuilder = arr => {
 
             for( let i = 0; i < arr.length / 2; i++ ){
 
@@ -628,7 +659,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         }
 
         particleGeo.addAttribute( 'reference',  attrBuilder( this._softParticleLimit, 2 ) );
-        refArrayBuilder( particleGeo.attributes.reference.array );
+        referenceArrayBuilder( particleGeo.attributes.reference.array );
         particleGeo.addAttribute( 'birthTime',  attrBuilder( this._softParticleLimit, 1 ) );
         particleGeo.addAttribute( 'size',       attrBuilder( this._softParticleLimit, 1 ) );
         particleGeo.addAttribute( 'lifetime',   attrBuilder( this._softParticleLimit, 1 ) );
@@ -792,7 +823,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this._offset = this._offset === null ? i : this._offset;
         this._count++;
 
-        const referenceAttribute =  this.points.geometry.getAttribute( 'reference' );
         const birthTimeAttribute =  this.points.geometry.getAttribute( 'birthTime' );
         const colourAttribute =     this.points.geometry.getAttribute( 'color' );
         const sizeAttribute =       this.points.geometry.getAttribute( 'size' );
@@ -888,7 +918,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
         if( !this.parent ){ console.warn( "No parent object!" ); return; };
 
         let delta = clock.getDelta() * this.params.TIME_SCALE;
-        delta = delta > 1 ? 1 : delta;
+        delta = delta > .05 ? .05 : delta;
 
         this.TIME += delta;
         this._count = 0;
@@ -1387,11 +1417,11 @@ Object.assign( THREE.ShaderChunk, {
 
     gpup_shader_pars_vertex: "\nattribute vec2 reference;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute float size;\nuniform float uTime;\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n",
 
-    begin_vertex_modified: "\nfloat t = uTime - birthTime;\nvec3 finalPosition = position * size + texture2D( textureOffset, reference ).xyz;\nvec3 transformed = vec3( finalPosition );\n",
+    begin_vertex_modified: "\nfloat age = uTime - birthTime;\nvec3 finalPosition = position * size + texture2D( textureOffset, reference ).xyz;\nif( age < 0.0 || age > lifetime ) finalPosition = vec3( 0, 0, 0 );\nvec3 transformed = vec3( finalPosition );\n",
 
     morphtarget_vertex_modified: "#ifdef USE_MORPHTARGETS\n\ttransformed += ( morphTarget0 - finalPosition ) * morphTargetInfluences[ 0 ];\n\ttransformed += ( morphTarget1 - finalPosition ) * morphTargetInfluences[ 1 ];\n\ttransformed += ( morphTarget2 - finalPosition ) * morphTargetInfluences[ 2 ];\n\ttransformed += ( morphTarget3 - finalPosition ) * morphTargetInfluences[ 3 ];\n\t#ifndef USE_MORPHNORMALS\n\ttransformed += ( morphTarget4 - finalPosition ) * morphTargetInfluences[ 4 ];\n\ttransformed += ( morphTarget5 - finalPosition ) * morphTargetInfluences[ 5 ];\n\ttransformed += ( morphTarget6 - finalPosition ) * morphTargetInfluences[ 6 ];\n\ttransformed += ( morphTarget7 - finalPosition ) * morphTargetInfluences[ 7 ];\n\t#endif\n#endif\n",
 
-    gpup_physics_offset_frag: `
+    gpup_offset_frag: `
         uniform float delta;
         uniform sampler2D particleInfo;
         uniform sampler2D newPos;
@@ -1416,16 +1446,16 @@ Object.assign( THREE.ShaderChunk, {
         }
     `,
 
-    gpup_physics_velocity_frag: `\nuniform float delta;\nuniform sampler2D particleInfo; //[isUpdated,mass,charge]\nuniform sampler2D newPos;\nuniform sampler2D newVel;\n\n<<<PHYSICS_PARS_CHUNK>>>\n\nvoid main() {\n\n\tvec2 uv = gl_FragCoord.xy / resolution.xy;\n\tvec4 uVel = texture2D( textureVelocity, uv );\n\tvec4 position = texture2D( textureOffset, uv );\n\tvec3 resForce = vec3( 0, 0, 0 );\n\tvec3 r_forcefield;\n\n\tvec3 particleInfo = texture2D( particleInfo, uv ).xyz;\n\tfloat isUpdated = particleInfo.x;\n\tfloat mass = particleInfo.y;\n\tfloat charge = particleInfo.z;\n\n\tif( isUpdated > 0.0 ){\n\t\tuVel = texture2D( newVel, uv );\n\t\tposition = texture2D( newPos, uv );\n\t}\n\n\t<<<PHYSICS_MAIN_CHUNK>>>\n\n\tvec3 vVel = uVel.xyz + ( resForce / mass ) * delta;\n\tgl_FragColor = vec4( vVel, 1 );\n\n}\n`,
+    gpup_velocity_frag: `\nuniform float delta;\nuniform sampler2D particleInfo; //[isUpdated,mass,charge]\nuniform sampler2D newPos;\nuniform sampler2D newVel;\n\n<<<PHYSICS_PARS_CHUNK>>>\n\nvoid main() {\n\n\tvec2 uv = gl_FragCoord.xy / resolution.xy;\n\tvec4 uVel = texture2D( textureVelocity, uv );\n\tvec4 position = texture2D( textureOffset, uv );\n\tvec3 resForce = vec3( 0, 0, 0 );\n\tvec3 r_forcefield;\n\n\tvec3 particleInfo = texture2D( particleInfo, uv ).xyz;\n\tfloat isUpdated = particleInfo.x;\n\tfloat mass = particleInfo.y;\n\tfloat charge = particleInfo.z;\n\n\tif( isUpdated > 0.0 ){\n\t\tuVel = texture2D( newVel, uv );\n\t\tposition = texture2D( newPos, uv );\n\t}\n\n\t<<<PHYSICS_MAIN_CHUNK>>>\n\n\tvec3 vVel = uVel.xyz + ( resForce / mass ) * delta;\n\tgl_FragColor = vec4( vVel, 1 );\n\n}\n`,
 
     gpup_physics:{
-        point_pars: `\nstruct PointForceField {\n\tvec3 position;\n\tfloat strength;\n\tfloat decay;\n};\nuniform PointForceField forcefields_point[ NUM_POINT_PHYS_ATTR ];\n`,
+        point_pars: `\nstruct sPointForceField {\n\tvec3 position;\n\tfloat strength;\n\tfloat decay;\n};\nuniform sPointForceField forcefields_point[ NUM_POINT_PHYS_ATTR ];\n`,
 
-        point_main: `\nPointForceField forcefield_point;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_POINT_PHYS_ATTR; i ++ ) {\n\t\tforcefield_point = forcefields_point[ i ];\n\t\tr_forcefield = position.xyz - forcefield_point.position;\n\t\tresForce += normalize( r_forcefield ) * forcefield_point.strength * mass / pow( length( r_forcefield ), forcefield_point.decay );\n}\n`,
+        point_main: `\nsPointForceField pointForceField;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_POINT_PHYS_ATTR; i ++ ) {\n\t\tpointForceField = forcefields_point[ i ];\n\t\tr_forcefield = position.xyz - pointForceField.position;\n\t\tresForce += normalize( r_forcefield ) * pointForceField.strength * mass / pow( length( r_forcefield ), pointForceField.decay );\n}\n`,
 
-        const_pars: `\nstruct ConstantForceField {\n\tvec3 acceleration;};\nuniform ConstantForceField forcefields_const[ NUM_CONST_PHYS_ATTR ];\n`,
+        const_pars: `\nstruct sConstantForceField {\n\tvec3 acceleration;};\nuniform sConstantForceField forcefields_const[ NUM_CONST_PHYS_ATTR ];\n`,
 
-        const_main: `\nConstantForceField forcefield_const;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_CONST_PHYS_ATTR; i ++ ) {\n\t\tforcefield_const = forcefields_const[ i ];\n\t\tresForce += forcefield_const.acceleration / mass;\n\t}\n`,
+        const_main: `\nsConstantForceField constForceField;\n#pragma unroll_loop\n\tfor ( int i = 0; i < NUM_CONST_PHYS_ATTR; i ++ ) {\n\t\tconstForceField = forcefields_const[ i ];\n\t\tresForce += constForceField.acceleration / mass;\n\t}\n`,
 
         boid_pars: `\nuniform float view_radius;\nuniform float separation_threshold; //Radius it wants clear of others\nuniform float separation_strength; //Repulsion from others\nuniform float flock_threshold; //Radius it considers boids to be part of its 'flock'\nuniform float cohesion_strength; //Attraction to centre of flock\nuniform float alignment_strength; //Strength of speed matching between flock members\n`,
 
