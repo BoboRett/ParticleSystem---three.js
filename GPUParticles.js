@@ -75,7 +75,7 @@ THREE.ParticleSystem = function( options ){
 
         void main() {
 
-            vColor = color;
+            vColor = texture2D( textureColour, reference );
             vUv = uv;
 
             float age = uTime - birthTime;
@@ -132,29 +132,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
     addTrails: function( length ){
 
-        if( length > 16 ){
-
-            console.warn( "Trail length capped at 16 due to GLSL limitations!" );
-            length = 16;
-
-        }
-
-        const referenceArrayBuilder = ( arr, clusterSize ) => {
-
-            for( let i = 0; i < arr.length / clusterSize; i++ ){
-
-                for( let j = 0; j < clusterSize; j++ ){
-
-                    arr[ ( i * clusterSize + j ) ] = j%2;
-
-                }
-
-            }
-
-            return arr
-
-        };
-
         const positionArraybuilder = ( arr, clusterSize ) => {
 
             for( let i = 0; i < arr.length / clusterSize; i++ ){
@@ -163,7 +140,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
                     arr[ ( i * clusterSize + j ) * 3     ] = ( i % this.gpuCompute.texSize ) / this.gpuCompute.texSize;
                     arr[ ( i * clusterSize + j ) * 3 + 1 ] = ~~( i / this.gpuCompute.texSize ) / this.gpuCompute.texSize;
-                    arr[ ( i * clusterSize + j ) * 3 + 2 ] = ~~( ( j + 1 ) / 2 );
+                    arr[ ( i * clusterSize + j ) * 3 + 2 ] = j%2;
 
                 }
 
@@ -173,39 +150,49 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         }
 
-        const clusterSize = ( length - 1 ) * 2;
-
-        const trailGeo = new THREE.BufferGeometry();
-
-        trailGeo.addAttribute( 'position', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit * 3 ), 3 ) );
-        positionArraybuilder( trailGeo.attributes.position.array, clusterSize );
-        trailGeo.addAttribute( 'reference', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit ), 1 ) );
-        referenceArrayBuilder( trailGeo.attributes.reference.array, clusterSize );
-        trailGeo.addAttribute( 'colour', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
+        const positionAttribute = new THREE.BufferAttribute( new Float32Array( 2 * this._softParticleLimit * 3 ), 3 );
+        positionArraybuilder( positionAttribute.array, 2 );
+        console.log( positionAttribute );
+        const trail = new THREE.Group();
 
         const trailMat = new THREE.ShaderMaterial( { transparent: true } );
 
         trailMat.vertexShader = `
 
-            attribute float reference;
-            attribute vec4 colour;
+            uniform sampler2D textureCurPos;
+            uniform sampler2D textureLastPos;
+            uniform sampler2D textureCurColour;
+            uniform sampler2D textureLastColour;
+            uniform float trailIndex;
+            uniform float trailLength;
+
             varying float vtrailIndex;
+            varying float vtrailLength;
             varying vec4 vColour;
 
             void main(){
 
-                vec4 trailPosition;
-                vec4 altPosition;
+                vec4 trailPosition = texture2D( textureCurPos, position.xy );
+                vec4 altPosition = texture2D( textureLastPos, position.xy );
 
-                vColour = colour;
 
-                float trailIndex = position.z;
-                vtrailIndex = trailIndex;
-
-                <<<TEXTURE_PICKER>>>
+                vtrailLength = trailLength;
 
                 if( length( trailPosition - altPosition ) > 0.5 ) trailPosition = altPosition;
-                vec4 mvPosition = modelViewMatrix * vec4( trailPosition.xyz, 1 );
+
+                vec4 mvPosition;
+
+                if( position.z == 1.0 ){
+                    vtrailIndex = trailIndex + 1.0;
+                    vColour = texture2D( textureLastColour, position.xy );
+                    mvPosition = modelViewMatrix * vec4( altPosition.xyz, 1 );
+
+                } else{
+                    vtrailIndex = trailIndex;
+                    vColour = texture2D( textureCurColour, position.xy );
+                    mvPosition = modelViewMatrix * vec4( trailPosition.xyz, 1 );
+                }
+
                 gl_Position = projectionMatrix * mvPosition;
 
             }
@@ -214,33 +201,60 @@ Object.assign( THREE.ParticleSystem.prototype, {
         trailMat.fragmentShader = `
 
         varying float vtrailIndex;
+        varying float vtrailLength;
         varying vec4 vColour;
 
         void main(){
-            float alpha = 1.0 / ( vtrailIndex + 1.0 );
+            float alpha = 1.0 - vtrailIndex/vtrailLength;
             gl_FragColor = vec4( vColour.xyz, vColour.w * alpha );
         }
 
         `;
 
-        trailMat.uniforms = {};
+        trailMat.uniforms = {
+
+            'textureCurPos': {
+                value: null
+            },
+            'textureLastPos': {
+                value: null
+            },
+            'textureCurColour': {
+                value: null
+            },
+            'textureLastColour': {
+                value: null
+            }
+
+        };
+
         let pars = "", texturePicker = "";
-
-        for( let i = 0; i < length; i++ ){
-
-            trailMat.uniforms["textureOffset" + i] = { value: this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture };
-            pars = "uniform sampler2D textureOffset" + i + ";\n" + pars;
-
-            texturePicker = "if( trailIndex == " + i + ".0 ) {\n\ttrailPosition = texture2D( textureOffset" + i + ", position.xy );\n\tif( reference == 1.0 ) {\n\t\taltPosition = texture2D( textureOffset" + (( i - 1 + length )%(length)) + ", position.xy );\n\t} else {\n\t\taltPosition = trailPosition;\n\t}\n}\n" + texturePicker;
-
-        }
 
         trailMat.vertexShader = pars + trailMat.vertexShader.replace( "<<<TEXTURE_PICKER>>>", texturePicker );
 
+        for( let i = 0; i < length; i++ ){
 
-        const trail = new THREE.LineSegments( trailGeo, trailMat );
+            const trailGeo = new THREE.BufferGeometry();
+
+            trailGeo.addAttribute( 'position', positionAttribute );
+            //trailGeo.addAttribute( 'reference', referenceAttribute );
+
+            const trailSegmentMat = trailMat.clone();
+            Object.assign( trailSegmentMat.uniforms, {
+                'trailIndex': {
+                    value: i
+                },
+                'trailLength': {
+                    value: length
+                }
+            } );
+            trail.add( new THREE.LineSegments( trailGeo, trailSegmentMat ) );
+
+        }
+
+        //trailGeo.addAttribute( 'colour', new THREE.BufferAttribute( new Float32Array( clusterSize * this._softParticleLimit * 4 ), 4 ).setDynamic( true ) );
+
         trail.length = length;
-        trail.clusterSize = clusterSize;
 
         this.add( trail );
         this.trails.push( trail );
@@ -485,23 +499,28 @@ Object.assign( THREE.ParticleSystem.prototype, {
             gpuCompute.texSize = texSize;
 
             //Create new textures, or reuse old data
-            let dataOffset, dataVelocity;
+            let dataOffset, dataVelocity, dataColour;
 
             dataOffset = this.gpuCompute ? this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture : gpuCompute.createTexture();
             dataVelocity = this.gpuCompute ? this.gpuCompute.getCurrentRenderTarget( this.velocityVar ).texture : gpuCompute.createTexture();
+            dataColour = this.gpuCompute ? this.gpuCompute.getCurrentRenderTarget( this.colourVar ).texture : gpuCompute.createTexture();
 
             //Variable holders
             let offsetVar = gpuCompute.addVariable( "textureOffset", THREE.ShaderChunk.gpup_offset_frag, dataOffset );
             let velocityVar = gpuCompute.addVariable( "textureVelocity", getVelocityFragment(), dataVelocity );
+            let colourVar = gpuCompute.addVariable( "textureColour", THREE.ShaderChunk.gpup_colour_frag, dataColour );
 
             velocityVar.wrapS = THREE.RepeatWrapping;
             velocityVar.wrapT = THREE.RepeatWrapping;
             offsetVar.wrapS = THREE.RepeatWrapping;
             offsetVar.wrapT = THREE.RepeatWrapping;
+            colourVar.wrapS = THREE.RepeatWrapping;
+            colourVar.wrapT = THREE.RepeatWrapping;
 
             //Variable dependencies
             gpuCompute.setVariableDependencies( offsetVar, [ velocityVar, offsetVar ] );
             gpuCompute.setVariableDependencies( velocityVar, [ velocityVar, offsetVar ] );
+            gpuCompute.setVariableDependencies( colourVar, [ velocityVar, offsetVar, colourVar ] );
 
             //Uniform templates
             let infoUniform, newVelUniform, newPosUniform;
@@ -509,25 +528,33 @@ Object.assign( THREE.ParticleSystem.prototype, {
             infoUniform =   { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
             newVelUniform = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
             newPosUniform = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 3 ), texSize, texSize, THREE.RGBFormat, THREE.FloatType ) };
+            newColUniform = { value: new THREE.DataTexture( new Float32Array( Math.pow( texSize, 2 ) * 4 ), texSize, texSize, THREE.RGBAFormat, THREE.FloatType ) };
 
             let offsetUniforms = offsetVar.material.uniforms;
             let velocityUniforms = velocityVar.material.uniforms;
+            let colourUniforms = colourVar.material.uniforms;
 
             //Frame tick
             offsetUniforms.delta = { value: 0.0 };
             velocityUniforms.delta = { value: 0.0 };
 
+            //Time
+            colourUniforms.uTime = { value: this.TIME };
+
             //New positions on particle spawn
             offsetUniforms.newPos = newPosUniform;
-            velocityUniforms.newPos = newPosUniform;
 
             //New velocities on particle spawn
             offsetUniforms.newVel = newVelUniform;
             velocityUniforms.newVel = newVelUniform;
 
+            //New colours on particle spawn
+            colourUniforms.newCol = newColUniform;
+
             //Particle info containers (updated/mass/charge)
             offsetUniforms.particleInfo = infoUniform;
             velocityUniforms.particleInfo = infoUniform;
+            colourUniforms.particleInfo = infoUniform;
 
             let error = gpuCompute.init();
             if ( error !== null ) {
@@ -538,11 +565,10 @@ Object.assign( THREE.ParticleSystem.prototype, {
             this.offsetVar = offsetVar;
             this.velocityVar = velocityVar;
             this.velocityUniforms = velocityUniforms;
+            this.colourVar = colourVar;
 
         } else{
 
-            this.offsetVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + THREE.ShaderChunk.gpup_offset_frag;
-            this.offsetVar.material.needsUpdate = true;
             this.velocityVar.material.fragmentShader = "\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n" + getVelocityFragment();
             this.velocityVar.material.needsUpdate = true;
 
@@ -654,7 +680,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
             attrBuilder = ( arrSize, itemSize ) => new THREE.BufferAttribute( new Float32Array( arrSize * itemSize ), itemSize ).setDynamic( true );
 
             particleGeo.addAttribute( 'position',  attrBuilder( this._softParticleLimit, 3 ) );
-            particleGeo.addAttribute( 'color',     attrBuilder( this._softParticleLimit, 4 ) );
 
         }
 
@@ -682,6 +707,9 @@ Object.assign( THREE.ParticleSystem.prototype, {
                 value: null
             },
             'textureVelocity': {
+                value: null
+            },
+            'textureColour': {
                 value: null
             }
         };
@@ -824,7 +852,6 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this._count++;
 
         const birthTimeAttribute =  this.points.geometry.getAttribute( 'birthTime' );
-        const colourAttribute =     this.points.geometry.getAttribute( 'color' );
         const sizeAttribute =       this.points.geometry.getAttribute( 'size' );
         const lifetimeAttribute =   this.points.geometry.getAttribute( 'lifetime' );
 
@@ -851,21 +878,12 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         //Colour
         const colour = this.initColour.clone();
+        const newCol = this.colourVar.material.uniforms.newCol.value.image.data
 
         Object.keys( colour ).forEach( ( dim, j ) => {
 
             colour[dim] = THREE.Math.clamp( colour[dim] + varyAttribute( this.params.VAR_COL[dim] ), 0, 1 );
-            colourAttribute.array[ i * 4 + j ] = colour[dim];
-
-            this.trails.forEach( trail => {
-
-                for( let k = 0; k < trail.clusterSize; k ++ ){
-
-                    trail.geometry.attributes.colour.array[ ( i * trail.clusterSize + k ) * 4 + j ] = colour[dim];
-
-                }
-
-            })
+            newCol[ i * 4 + j ] = colour[dim];
 
         });
 
@@ -882,7 +900,7 @@ Object.assign( THREE.ParticleSystem.prototype, {
 
         if( this._count < 1 ) return;
 
-        ['birthTime', 'color', 'size', 'lifetime'].forEach( attrName => {
+        ['birthTime', 'size', 'lifetime'].forEach( attrName => {
 
             const attr = this.points.geometry.getAttribute( attrName );
 
@@ -896,21 +914,8 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.offsetVar.material.uniforms.particleInfo.value.needsUpdate = true;
         this.offsetVar.material.uniforms.newPos.value.needsUpdate = true;
         this.velocityVar.material.uniforms.newVel.value.needsUpdate = true;
+        this.colourVar.material.uniforms.newCol.value.needsUpdate = true;
 
-        this.trails.forEach( trail => {
-
-            ['reference', 'colour' ].forEach( attrName => {
-
-                const attr = trail.geometry.getAttribute( attrName );
-
-                attr.updateRange.count = this._count * trail.clusterSize * 4;
-                attr.updateRange.offset = this._offset * trail.clusterSize * 4;
-
-                attr.needsUpdate = true;
-
-            })
-
-        });
     },
 
     update: function(){
@@ -948,17 +953,25 @@ Object.assign( THREE.ParticleSystem.prototype, {
         this.points.material.uniforms.uTime.value = this.TIME;
         this.points.material.uniforms.textureOffset.value = this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture;
         this.points.material.uniforms.textureVelocity.value = this.gpuCompute.getCurrentRenderTarget( this.velocityVar ).texture;
+        this.points.material.uniforms.textureColour.value = this.gpuCompute.getCurrentRenderTarget( this.colourVar ).texture;
+
+        this.colourVar.material.uniforms.uTime.value = this.TIME;
+
 
         this.trails.forEach( trail => {
 
-            const uniforms = trail.material.uniforms;
-            Object.keys( uniforms ).reverse().sort( ( next, curr ) => {
+            trail.children.forEach( ( segment, i ) => {
 
-                uniforms[curr].value = uniforms[next].value;
+                const uniforms = segment.material.uniforms;
 
-            });
+                const getTextureIndex = index => ( this.gpuCompute.currentTextureIndex - index + this._maxTrailLength ) % ( this._maxTrailLength + 1 ) ;
 
-            uniforms["textureOffset0"].value = this.gpuCompute.getCurrentRenderTarget( this.offsetVar ).texture;
+                uniforms.textureCurPos.value = this.gpuCompute.getRenderTarget( this.offsetVar, getTextureIndex( i ) ).texture;
+                uniforms.textureLastPos.value = this.gpuCompute.getRenderTarget( this.offsetVar, getTextureIndex( i + 1 ) ).texture;
+                uniforms.textureCurColour.value = this.gpuCompute.getRenderTarget( this.colourVar, getTextureIndex( i ) ).texture;
+                uniforms.textureLastColour.value = this.gpuCompute.getRenderTarget( this.colourVar, getTextureIndex( i + 1 ) ).texture;
+
+            })
 
         });
 
@@ -1415,7 +1428,7 @@ Object.assign( THREE.PointForce.prototype, {
 
 Object.assign( THREE.ShaderChunk, {
 
-    gpup_shader_pars_vertex: "\nattribute vec2 reference;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute float size;\nuniform float uTime;\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\n",
+    gpup_shader_pars_vertex: "\nattribute vec2 reference;\nattribute float birthTime;\nattribute vec4 color;\nattribute float lifetime;\nattribute float size;\nuniform float uTime;\nuniform sampler2D textureOffset;\nuniform sampler2D textureVelocity;\nuniform sampler2D textureColour;\n",
 
     begin_vertex_modified: "\nfloat age = uTime - birthTime;\nvec3 finalPosition = position * size + texture2D( textureOffset, reference ).xyz;\nif( age < 0.0 || age > lifetime ) finalPosition = vec3( 0, 0, 0 );\nvec3 transformed = vec3( finalPosition );\n",
 
@@ -1447,6 +1460,30 @@ Object.assign( THREE.ShaderChunk, {
     `,
 
     gpup_velocity_frag: `\nuniform float delta;\nuniform sampler2D particleInfo; //[isUpdated,mass,charge]\nuniform sampler2D newPos;\nuniform sampler2D newVel;\n\n<<<PHYSICS_PARS_CHUNK>>>\n\nvoid main() {\n\n\tvec2 uv = gl_FragCoord.xy / resolution.xy;\n\tvec4 uVel = texture2D( textureVelocity, uv );\n\tvec4 position = texture2D( textureOffset, uv );\n\tvec3 resForce = vec3( 0, 0, 0 );\n\tvec3 r_forcefield;\n\n\tvec3 particleInfo = texture2D( particleInfo, uv ).xyz;\n\tfloat isUpdated = particleInfo.x;\n\tfloat mass = particleInfo.y;\n\tfloat charge = particleInfo.z;\n\n\tif( isUpdated > 0.0 ){\n\t\tuVel = texture2D( newVel, uv );\n\t\tposition = texture2D( newPos, uv );\n\t}\n\n\t<<<PHYSICS_MAIN_CHUNK>>>\n\n\tvec3 vVel = uVel.xyz + ( resForce / mass ) * delta;\n\tgl_FragColor = vec4( vVel, 1 );\n\n}\n`,
+
+    gpup_colour_frag: `
+
+    uniform sampler2D particleInfo;
+    uniform sampler2D newCol;
+    uniform float uTime;
+
+    void main() {
+
+        vec4 colour;
+
+        vec2 uv = gl_FragCoord.xy / resolution.xy;
+
+        vec3 particleInfo = texture2D( particleInfo, uv ).xyz;
+        float isUpdated = particleInfo.x;
+
+        colour = texture2D( textureColour, uv );
+
+        if( isUpdated > 0.0 ){
+            colour = texture2D( newCol, uv );
+        }
+
+        gl_FragColor = colour;
+    }`,
 
     gpup_physics:{
         point_pars: `\nstruct sPointForceField {\n\tvec3 position;\n\tfloat strength;\n\tfloat decay;\n};\nuniform sPointForceField forcefields_point[ NUM_POINT_PHYS_ATTR ];\n`,

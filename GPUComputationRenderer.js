@@ -250,8 +250,8 @@ function GPUComputationRenderer( sizeX, sizeY, renderer, history ) {
 	};
 
 	this.getRenderTarget = function( variable, index ) {
-
-		return variable.renderTargets[ index ];
+		
+		return variable.renderTargets[ ( index + variable.renderTargets.length ) % variable.renderTargets.length ];
 
 	};
 
